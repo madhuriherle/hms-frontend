@@ -2,6 +2,44 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Row actions (View / Edit / Delete / Print / Approve): one tinted icon-and-name button everywhere.
+   The colour follows the icon inside, so no screen has to choose it. */
+@layer components {
+  .btn-act {
+    --act: 81 6 1;
+    @apply inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg shrink-0 cursor-pointer transition-colors whitespace-nowrap;
+    color: rgb(var(--act));
+    background-color: rgb(var(--act) / 0.09);
+  }
+  .btn-act:hover { background-color: rgb(var(--act) / 0.18); }
+  .btn-act:disabled { @apply opacity-40 cursor-not-allowed; }
+  .btn-act:disabled:hover { background-color: rgb(var(--act) / 0.09); }
+  .btn-act:has(.lucide-pencil) { --act: 180 83 9; }
+  .btn-act:has(.lucide-printer) { --act: 134 50 33; }
+  .btn-act:has(.lucide-eye) { --act: 81 6 1; }
+  .btn-act:has(.lucide-trash-2), .btn-act:has(.lucide-circle-x), .btn-act:has(.lucide-x-circle), .btn-act-danger { --act: 140 24 1; }
+  .btn-act:has(.lucide-check), .btn-act-ok { --act: 61 112 92; }
+
+  /* Status chips */
+  .chip {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap;
+    --chip: 134 50 33;
+    color: rgb(var(--chip) / 0.8);
+    background-color: rgb(var(--chip) / 0.1);
+  }
+  button.chip { @apply cursor-pointer; }
+  button.chip:hover { background-color: rgb(var(--chip) / 0.2); }
+  .chip-on { --chip: 61 112 92; color: rgb(61 112 92); }
+  .chip-warn { --chip: 238 106 0; color: rgb(179 78 0); }
+  .chip-bad { --chip: 140 24 1; color: rgb(140 24 1); }
+  .chip-brand { --chip: 81 6 1; color: rgb(81 6 1); }
+  .chip-off { --chip: 134 50 33; }
+
+  /* Neat rows on every list: centred contents, nothing smaller than 12px */
+  table tbody td { vertical-align: middle; }
+  table tbody td [class*="text-[10px]"], table tbody td [class*="text-[11px]"] { font-size: 0.75rem; line-height: 1rem; }
+}
+
 @layer base {
   :root {
     /* Brand Core Palette */
@@ -69,7 +107,7 @@
   select,
   textarea,
   optgroup {
-    font-family: Inter, system-ui, "Segoe UI", Roboto, sans-serif;
+    font-family: Nunito, Inter, system-ui, "Segoe UI", Roboto, sans-serif;
   }
 
   *,
@@ -166,14 +204,40 @@
     display: none !important;
   }
 
-  /* 6. Printable label cards formatting */
+  /* 6. Printable label cards formatting: the pre-cut sticker sheet (3 x 7, A4) - no lines, Times, edge to edge */
+  .label-sheet {
+    page: labels;
+    display: grid !important;
+    grid-template-columns: repeat(3, 70mm) !important;
+    grid-auto-rows: 42.43mm !important;
+    gap: 0 !important;
+    width: 210mm !important;
+  }
   .printable-label-card {
     break-inside: avoid !important;
     page-break-inside: avoid !important;
-    border: 1px dashed #777 !important;
+    border: 0 !important;
     background: #ffffff !important;
     box-shadow: none !important;
+    box-sizing: border-box !important;
+    width: 70mm !important;
+    height: 42.43mm !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    padding: 7mm 5mm 2mm !important;
+    color: #000 !important;
   }
+}
+
+/* The label sheet prints on A4 with no page margin, so each label sits on its own sticker */
+@page labels {
+  size: A4 portrait;
+  margin: 0;
+}
+
+/* Labels use the same serif face as the printed sticker sheets */
+.printable-label-card {
+  font-family: "Times New Roman", Times, serif;
 }
 
 /* Popups must sit above every form modal (the app's Modal is z-index 9999) */
@@ -281,3 +345,6 @@
 @media (prefers-reduced-motion: reduce) {
   .hms-nf-bob, .hms-nf-spin, .hms-nf-shadow, .hms-nf-four, .hms-nf-dot { animation: none !important; }
 }
+
+/* numbers and codes use the body font, with equal-width digits so columns still line up */
+.font-mono { font-variant-numeric: tabular-nums; }

@@ -1,6 +1,6 @@
+import FilterToggle from '../components/FilterToggle';
 import React, { useState, useMemo } from 'react';
 import { applyBulk, stateOf, toggleOne } from '../utils/privilegeSelection';
-import { Link } from 'react-router-dom';
 import Modal from '../components/Modal';
 import {
   Shield,
@@ -10,43 +10,37 @@ import {
   Pencil,
   Trash2,
   Eye,
-  Power,
   ChevronRight,
   ChevronLeft,
   CheckCircle2,
   X,
   AlertCircle,
-  AlertTriangle,
   RefreshCw,
   Users,
-  Key,
-  CheckSquare,
   Check,
   Save,
   Minus,
-  Square,
-  Lock,
-  Calendar,
   Layers,
-  FileText,
-  Clock
 } from 'lucide-react';
 import api from '../api';
 import { formatDate } from '../utils/dateUtils';
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
+import PageTitle from '../components/PageTitle';
 
+import ModalFooter from '../components/ModalFooter';
 export default function RolesAndPrivileges() {
   // Master state
   const [roles, setRoles] = useState([]);
   
-  const [allPrivileges, setAllPrivileges] = useState([]);
+  const [, setAllPrivileges] = useState([]);
   const [allPrivilegeIds, setAllPrivilegeIds] = useState([]);
   const [privilegeRows, setPrivilegeRows] = useState([]); // module / sub-module rows for the privilege table
   const [disabledPrivilegeIds, setDisabledPrivilegeIds] = useState([]); // privileges of modules that are switched off (not built yet)
 
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
 
   const errDetail = (err, fallback) => {
     const d = err?.response?.data?.detail;
@@ -69,7 +63,7 @@ export default function RolesAndPrivileges() {
   });
 
   const fetchRoles = async () => {
-    const rolesRes = await api.get('/users/roles', { params: { limit: 500 } });
+    const rolesRes = await api.get('/users/roles', { params: { limit: 200 } });
     const rows = Array.isArray(rolesRes.data)
       ? rolesRes.data
       : (rolesRes.data?.data || rolesRes.data?.items || []);
@@ -88,9 +82,12 @@ export default function RolesAndPrivileges() {
         const matrixRows = [];
         const offIds = [];
 
-        const traverse = (modList, path = "", depth = 0, parentOff = false) => {
+        const traverse = (modList, path = "", depth = 0, parentOff = false, parentRank = null) => {
            for (const mod of modList) {
               const off = parentOff || mod.status === false;
+              // a module is only as reachable as every module above it: the strictest (smallest) rank wins
+              const ranks = [parentRank, mod.min_rank_level].filter((r) => r != null);
+              const effRank = ranks.length ? Math.min(...ranks) : null;
               const currentPath = path ? `${path} > ${mod.name}` : mod.name;
               // one table row per module: Read / Write / Delete cells, anything else goes to "Other"
               const cells = { read: null, write: null, delete: null };
@@ -102,7 +99,7 @@ export default function RolesAndPrivileges() {
               }
               if ((mod.privileges && mod.privileges.length > 0) || (mod.submodules && mod.submodules.length > 0)) {
                 matrixRows.push({
-                  code: mod.code, name: mod.name, depth, min_rank_level: mod.min_rank_level ?? null, disabled: off,
+                  code: mod.code, name: mod.name, depth, min_rank_level: effRank, disabled: off,
                   cells, other, hasChildren: Boolean(mod.submodules && mod.submodules.length > 0)
                 });
               }
@@ -116,13 +113,13 @@ export default function RolesAndPrivileges() {
                  }));
                formattedGroups.push({
                   module: currentPath,
-                  min_rank_level: mod.min_rank_level ?? null,
+                  min_rank_level: effRank,
                   privileges: formattedPrivs
                });
                  allIds.push(...formattedPrivs.map(p => p.id));
               }
               if (mod.submodules && mod.submodules.length > 0) {
-                 traverse(mod.submodules, currentPath, depth + 1, off);
+                 traverse(mod.submodules, currentPath, depth + 1, off, effRank);
               }
            }
         };
@@ -134,7 +131,7 @@ export default function RolesAndPrivileges() {
         setDisabledPrivilegeIds(offIds);
 
       } catch (err) {
-        console.error("Error fetching data", err);
+        console.error("Error fetching data", err); showToast(err.response?.data?.detail || 'Could not load data from the server.', 'error');
       } finally {
         setLoading(false);
       }
@@ -206,13 +203,6 @@ export default function RolesAndPrivileges() {
   // ----------------------------------------------------
   // SUMMARY METRICS
   // ----------------------------------------------------
-  const summaryStats = useMemo(() => {
-    const total = roles.length;
-    const active = roles.filter(r => isRoleActive(r)).length;
-    const inactive = roles.filter(r => !isRoleActive(r)).length;
-    const totalAssignedUsers = roles.reduce((acc, r) => acc + (r.usersCount || 0), 0);
-    return { total, active, inactive, totalAssignedUsers };
-  }, [roles]);
 
   // ----------------------------------------------------
   // SEARCH & FILTERING
@@ -224,6 +214,7 @@ export default function RolesAndPrivileges() {
   };
 
   const hasActiveFilters = searchQuery !== '' || statusFilter !== 'ALL';
+  const [filtersOpen, setFiltersOpen] = useState(false); // the filters show only when the filter icon is clicked
 
   const filteredRoles = useMemo(() => {
     return roles.filter((role) => {
@@ -272,7 +263,7 @@ export default function RolesAndPrivileges() {
   const openEditModal = (role) => {
     if (!canManageRole(role)) {
       showToast(
-        isSystemRole(role) ? 'System roles cannot be edited.' : 'This role is at or above your rank and cannot be edited.',
+        isSystemRole(role) ? 'System roles cannot be edited.' : 'You cannot edit this role.',
         'error'
       );
       return;
@@ -318,11 +309,11 @@ export default function RolesAndPrivileges() {
       }
     }
 
+    // a role can only be given a rank weaker (a bigger number) than your own
     const rank = Number(formData.rank_level);
-    if (!Number.isInteger(rank) || rank < 1) {
-      errors.rank_level = 'Rank must be a whole number of 1 or more.';
-    } else if (rank <= myRankLevel) {
-      errors.rank_level = `Rank must be weaker (a higher number) than your own rank (${myRankLevel}).`;
+    const lowest = myRankLevel + 1;
+    if (!Number.isInteger(rank) || rank < lowest || rank > 99) {
+      errors.rank_level = `Rank must be a whole number from ${lowest} to 99.`;
     }
 
     setFormErrors(errors);
@@ -339,10 +330,8 @@ export default function RolesAndPrivileges() {
         : (formData.status === 'Active' || formData.status === 'true');
 
       if (modalMode === 'add') {
-        const slug = formData.name.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16);
         const res = await api.post('/users/roles', {
           name: formData.name.trim(),
-          code: `${slug || 'ROLE'}_${Date.now().toString().slice(-4)}`,
           description: formData.description.trim(),
           status: statusActive,
           rank_level: Number(formData.rank_level)
@@ -376,7 +365,7 @@ export default function RolesAndPrivileges() {
   const promptToggleStatus = (role) => {
     if (!canManageRole(role)) {
       showToast(
-        isSystemRole(role) ? 'System roles cannot be deactivated.' : 'This role is at or above your rank and cannot be changed.',
+        isSystemRole(role) ? 'System roles cannot be deactivated.' : 'You cannot change this role.',
         'error'
       );
       return;
@@ -450,24 +439,40 @@ export default function RolesAndPrivileges() {
   };
 
   // Selection rules (Write/Delete tick Read; clearing Read clears them) live in utils/privilegeSelection.js
-  const handleTogglePrivilege = (id) => setSelectedPrivileges(prev => toggleOne(prev, id, allPrivilegeIds));
-
-  // Tick or clear several privileges at once (a column, a row, a module, or everything)
-  const applyPrivilegeBulk = (codes, on) => setSelectedPrivileges(prev => applyBulk(prev, codes, on, allPrivilegeIds));
-
-  const handleToggleApprovalGate = (id) => {
-    setApprovalRequiredCodes(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
-  };
-
-  const handleToggleModulePrivileges = (ids) => {
+  const handleTogglePrivilege = (id) => {
     setSelectedPrivileges(prev => {
-      const allSelected = ids.every(id => prev.includes(id));
-      if (allSelected) return prev.filter(id => !ids.includes(id));
-      return Array.from(new Set([...prev, ...ids]));
+      const next = toggleOne(prev, id, allPrivilegeIds);
+      if (!next.includes(id)) {
+        setApprovalRequiredCodes(a => a.filter(x => x !== id));
+      }
+      return next;
     });
   };
+
+  // Tick or clear several privileges at once (a column, a row, a module, or everything)
+  const applyPrivilegeBulk = (codes, on) => {
+    setSelectedPrivileges(prev => applyBulk(prev, codes, on, allPrivilegeIds));
+    if (!on) {
+      const drop = new Set(codes);
+      setApprovalRequiredCodes(prev => prev.filter(x => !drop.has(x)));
+    }
+  };
+
+  const handleToggleApprovalGate = (codesOrId, targetState) => {
+    const list = (Array.isArray(codesOrId) ? codesOrId : [codesOrId]).filter(Boolean);
+    if (list.length === 0) return;
+    setApprovalRequiredCodes(prev => {
+      const allPresent = list.every(c => prev.includes(c));
+      const shouldAdd = targetState !== undefined ? Boolean(targetState) : !allPresent;
+      if (shouldAdd) {
+        return Array.from(new Set([...prev, ...list]));
+      } else {
+        const drop = new Set(list);
+        return prev.filter(x => !drop.has(x));
+      }
+    });
+  };
+
 
   const handleMasterToggleAll = () => {
     setSelectedPrivileges(prev =>
@@ -475,24 +480,11 @@ export default function RolesAndPrivileges() {
     );
   };
 
-  const filteredPrivilegeGroups = useMemo(() => {
-    const q = privilegeSearch.toLowerCase().trim();
-    if (!q) return allPrivileges;
-    return allPrivileges
-      .map(g => ({
-        ...g,
-        privileges: g.privileges.filter(p =>
-          p.name.toLowerCase().includes(q) ||
-          (p.description || '').toLowerCase().includes(q)
-        ),
-      }))
-      .filter(g => g.module.toLowerCase().includes(q) || g.privileges.length > 0);
-  }, [allPrivileges, privilegeSearch]);
 
   const handleSavePrivileges = async () => {
     if (!privilegeTargetRole || savingPrivileges) return;
     if (!canManageRole(privilegeTargetRole)) {
-      showToast('This role is at or above your rank; its privileges cannot be modified.', 'error');
+      showToast('You cannot change the privileges of this role.', 'error');
       return;
     }
     const target = privilegeTargetRole;
@@ -522,6 +514,49 @@ export default function RolesAndPrivileges() {
       setSavingPrivileges(false);
     }
   };
+
+  useSwalConfirm(
+    deleteTargetRole,
+    () => setDeleteTargetRole(null),
+    (d) => {
+      if (d.usersCount > 0 || isSystemRole(d)) {
+        const system = d.isSystem || d.is_all_access || d.rank_level === 0;
+        return {
+          title: 'Cannot delete role',
+          text: system
+            ? `${d.name} is a core system role with all-access permissions and cannot be deleted.`
+            : `This role is assigned to ${d.usersCount} users and cannot be deleted. Reassign those users first.`,
+          confirmText: 'OK',
+          info: true,
+        };
+      }
+      return {
+        title: 'Delete role?',
+        text: `Are you sure you want to delete role ${d.name}? This action cannot be undone.`,
+        confirmText: 'Yes, delete',
+        danger: true,
+      };
+    },
+    async () => {
+      const d = deleteTargetRole;
+      if (d.usersCount > 0 || isSystemRole(d)) return;
+      await confirmDeleteRole();
+    }
+  );
+
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => ({
+      title: `${d.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} role?`,
+      text: d.newStatus === 'Inactive'
+        ? `Deactivate ${d.role.name}? Inactive roles cannot be assigned to new user accounts.`
+        : `Activate ${d.role.name}? It will become available for assignment to user accounts.`,
+      confirmText: d.newStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+      danger: d.newStatus === 'Inactive',
+    }),
+    handleConfirmStatusToggle
+  );
 
   return (
     <PermissionGate required="roles.read">
@@ -567,29 +602,24 @@ export default function RolesAndPrivileges() {
       </Modal>
 
       <div className={privilegeTargetRole ? 'hidden' : 'space-y-6'}>
-      {/* Breadcrumb & Header */}
-      <div>
-<div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-              User Roles & Privileges
-            </h1>
-          </div>
-
+      {/* Action row: the filter icon, and Add Role when this login may write */}
+      <div className="flex items-center justify-end gap-2 -mb-2">
+        <FilterToggle open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)} count={statusFilter !== 'ALL' ? 1 : 0} />
+        {hasPermission('roles.write') && (
           <button
             onClick={openAddModal}
-            disabled={!hasPermission('roles.write')}
-            title={!hasPermission('roles.write') ? 'You need the roles.write permission' : 'Add Role'}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer self-start sm:self-auto"
+            title={'Add Role'}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Add Role</span>
           </button>
-        </div>
+        )}
       </div>
 
       {/* Search & Filters Toolbar Card */}
-      <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
+      {filtersOpen && (
+<div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
 
             {/* Search Field */}
@@ -614,7 +644,7 @@ export default function RolesAndPrivileges() {
 
             {/* Filter Controls */}
             <div className="flex items-center gap-2.5">
-              <select
+                            <select
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
                 className="py-2 px-3.5 bg-white border border-[#E8DFD8] rounded-xl text-sm text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601] shadow-sm cursor-pointer"
@@ -634,10 +664,11 @@ export default function RolesAndPrivileges() {
                   <span>Clear Filters</span>
                 </button>
               )}
-            </div>
+                            </div>
 
           </div>
       </div>
+      )}
 
       {/* Roles Table Card */}
       <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] overflow-hidden">
@@ -679,16 +710,15 @@ export default function RolesAndPrivileges() {
                           type="button"
                           disabled={isLocked || !hasPermission('roles.write')}
                           onClick={() => !isLocked && promptToggleStatus(role)}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold transition-all ${
+                          className={`text-xs font-semibold ${
                             isLocked
-                              ? 'bg-[#3D705C]/10 text-[#3D705C] cursor-not-allowed opacity-80'
+                              ? 'text-[#3D705C] cursor-not-allowed opacity-80'
                               : isActive
-                                ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 cursor-pointer hover:opacity-80 active:scale-95'
-                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 cursor-pointer hover:opacity-80 active:scale-95'
+                                ? 'chip chip-on cursor-pointer'
+                                : 'chip chip-off cursor-pointer'
                           }`}
-                          title={!hasPermission('roles.write') ? 'You need the roles.write permission' : isSys ? 'System role is permanently Active' : isLocked ? 'Role is at or above your rank' : (isActive ? 'Click to deactivate role' : 'Click to activate role')}
+                          title={!hasPermission('roles.write') ? 'You need the roles.write permission' : isSys ? 'System role is permanently Active' : isLocked ? 'You cannot change this role' : (isActive ? 'Click to deactivate role' : 'Click to activate role')}
                         >
-                          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                           {isActive ? 'Active' : 'Inactive'}
                         </button>
                       </td>
@@ -698,17 +728,17 @@ export default function RolesAndPrivileges() {
                           <button
                             disabled={isSys}
                             onClick={() => !isSys && openPrivilegeModal(role)}
-                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${isSys ? 'text-gray-300 border-transparent cursor-not-allowed opacity-40' : 'text-[#510601] bg-[#FAF7F2] hover:bg-[#F1E7DE] border-[#E8DFD8] cursor-pointer'}`}
+                            className={`btn-act ${isSys ? 'opacity-40 cursor-not-allowed' : ''}`}
                             title={isSys ? 'System role privileges are permanent and cannot be modified' : 'Configure Privileges'}
                           >
                             <ShieldCheck className="w-3.5 h-3.5" />
                             <span>Privileges</span>
                           </button>
 
-                          {/* View details (rank, description, privileges, dates) */}
+                          {/* View details (description, privileges, dates) */}
                           <button
                             onClick={() => setViewingRole(role)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-all cursor-pointer"
+                            className="btn-act"
                             title="View Details"
                           >
                             <Eye className="w-3.5 h-3.5" />
@@ -716,27 +746,31 @@ export default function RolesAndPrivileges() {
                           </button>
 
                           {/* Edit */}
-                          <button
-                            disabled={isLocked || !hasPermission('roles.write')}
-                            onClick={() => !isLocked && openEditModal(role)}
-                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${isLocked ? 'text-gray-300 border-transparent cursor-not-allowed opacity-40' : 'text-amber-700 bg-amber-50 hover:bg-amber-100 border-amber-200 cursor-pointer'}`}
-                            title={!hasPermission('roles.write') ? 'You need the roles.write permission' : isSys ? 'System role cannot be edited' : isLocked ? 'Role is at or above your rank' : 'Edit Role'}
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
+                          {hasPermission('roles.write') && (
+                            <button
+                              disabled={isLocked}
+                              onClick={() => !isLocked && openEditModal(role)}
+                              className={`btn-act ${isLocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+                              title={!hasPermission('roles.write') ? 'You need the roles.write permission' : isSys ? 'System role cannot be edited' : isLocked ? 'You cannot change this role' : 'Edit Role'}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+                          )}
 
                           {/* Delete (only for deletable roles) */}
                           {!isDeleteDisabled && (
-                            <button
-                              disabled={isLocked || !hasPermission('roles.delete')}
-                              onClick={() => setDeleteTargetRole(role)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                              title={!hasPermission('roles.delete') ? 'You need the roles.delete permission' : 'Delete Role'}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete</span>
-                            </button>
+                            hasPermission('roles.delete') && (
+                              <button
+                                disabled={isLocked}
+                                onClick={() => setDeleteTargetRole(role)}
+                                className="btn-act btn-act-danger"
+                                title={'Delete Role'}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete</span>
+                              </button>
+                            )
                           )}
                         </div>
                       </td>
@@ -764,14 +798,15 @@ export default function RolesAndPrivileges() {
                           Clear Filters
                         </button>
                       ) : (
-                        <button
-                          onClick={openAddModal}
-                          disabled={!hasPermission('roles.write')}
-                          title={!hasPermission('roles.write') ? 'You need the roles.write permission' : undefined}
-                          className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                        >
-                          Add Role
-                        </button>
+                        hasPermission('roles.write') && (
+                          <button
+                            onClick={openAddModal}
+
+                            className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                          >
+                            Add Role
+                          </button>
+                        )
                       )}
                     </div>
                   </td>
@@ -782,7 +817,7 @@ export default function RolesAndPrivileges() {
         </div>
 
         {/* Pagination Section */}
-        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3 text-xs text-[#863221] font-medium">
             <span>
               Showing {filteredRoles.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} to{' '}
@@ -862,7 +897,7 @@ export default function RolesAndPrivileges() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Shield className="w-5 h-5" />
@@ -871,9 +906,6 @@ export default function RolesAndPrivileges() {
                 <h3 className="text-base font-bold text-[#180200]">
                   {modalMode === 'add' ? 'Add User Role' : 'Edit User Role'}
                 </h3>
-                <p className="text-xs text-[#863221]">
-                  {modalMode === 'add' ? 'Define a new role and establish privilege defaults.' : 'Update role title, description, and status.'}
-                </p>
               </div>
             </div>
             <button
@@ -910,6 +942,34 @@ export default function RolesAndPrivileges() {
               )}
             </div>
 
+            {/* Rank */}
+            <div>
+              <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
+                Rank <span className="text-[#ED4636]">*</span>
+              </label>
+              <input
+                type="number"
+                name="rank_level"
+                min={myRankLevel + 1}
+                max={99}
+                value={formData.rank_level}
+                onChange={handleFormChange}
+                className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm font-semibold text-[#180200] placeholder-[#863221]/40 focus:outline-none transition-colors ${formErrors.rank_level
+                  ? 'border-[#ED4636] ring-1 ring-[#ED4636]/30 bg-red-50/20'
+                  : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
+                  }`}
+              />
+              <p className="text-[10px] text-[#863221]/70 mt-1">
+                A smaller number has more authority. Choose {myRankLevel + 1} to 99 (default 99).
+              </p>
+              {formErrors.rank_level && (
+                <p className="text-xs text-[#ED4636] mt-1 font-medium flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  {formErrors.rank_level}
+                </p>
+              )}
+            </div>
+
             {/* Description */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
@@ -922,33 +982,6 @@ export default function RolesAndPrivileges() {
                 onChange={handleFormChange}
                 className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] rounded-xl text-xs text-[#180200] placeholder-[#863221]/40 focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601] transition-colors resize-none"
               />
-            </div>
-
-            {/* Rank Level */}
-            <div>
-              <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                Rank Level <span className="text-[#ED4636]">*</span>
-              </label>
-              <input
-                type="number"
-                name="rank_level"
-                min={myRankLevel + 1}
-                value={formData.rank_level}
-                onChange={handleFormChange}
-                className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm font-semibold text-[#180200] placeholder-[#863221]/40 focus:outline-none transition-colors ${formErrors.rank_level
-                  ? 'border-[#ED4636] ring-1 ring-[#ED4636]/30 bg-red-50/20'
-                  : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
-                  }`}
-              />
-              <p className="text-[10px] text-[#863221]/70 mt-1">
-                1 = highest authority, larger = weaker (default 99). Must be weaker than your own rank ({myRankLevel}).
-              </p>
-              {formErrors.rank_level && (
-                <p className="text-xs text-[#ED4636] mt-1 font-medium flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  {formErrors.rank_level}
-                </p>
-              )}
             </div>
 
             {/* Status */}
@@ -968,21 +1001,7 @@ export default function RolesAndPrivileges() {
             </div>
 
             {/* Actions */}
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsAddEditOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
-              >
-                {modalMode === 'add' ? 'Save Role' : 'Update Role'}
-              </button>
-            </div>
+            <ModalFooter kind={modalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsAddEditOpen(false)} inForm />
 
           </form>
         </div>
@@ -999,21 +1018,23 @@ export default function RolesAndPrivileges() {
           const isReadOnly = isSysTarget || isProtectedTarget;
           return (
             <div className="space-y-6">
-              {/* Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <h1 className="flex flex-wrap items-center gap-3 text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-                  <span>Configure Privileges – {privilegeTargetRole.name}</span>
+              {/* Dynamic Page Title in Header Bar */}
+              <PageTitle>{`Configure Privileges – ${privilegeTargetRole.name}`}</PageTitle>
+
+              {/* Action Bar */}
+              <div className="flex items-center justify-between gap-4 -mb-2">
+                <div className="flex items-center gap-2">
                   {isReadOnly && (
-                    <span className="px-2 py-0.5 bg-[#FFC107]/20 border border-[#FFC107]/40 text-[#863221] text-[11px] font-bold rounded-md tracking-normal">
-                      {isSysTarget ? 'System Role (Read-Only)' : 'Rank-Protected (Read-Only)'}
+                    <span className="px-2.5 py-1 bg-[#FFC107]/20 border border-[#FFC107]/40 text-[#863221] text-xs font-bold rounded-lg tracking-normal">
+                      {isSysTarget ? 'System Role (Read-Only)' : 'Protected (Read-Only)'}
                     </span>
                   )}
-                </h1>
+                </div>
 
                 <button
                   type="button"
                   onClick={() => setPrivilegeTargetRole(null)}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-[#E8DFD8] hover:bg-[#FAF7F2] text-[#510601] text-sm font-semibold rounded-xl transition-colors cursor-pointer"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-white border border-[#E8DFD8] hover:bg-[#FAF7F2] text-[#510601] text-xs sm:text-sm font-semibold rounded-xl transition-colors cursor-pointer"
                 >
                   <ChevronLeft className="w-4 h-4" />
                   <span>Back to Roles</span>
@@ -1082,7 +1103,7 @@ export default function RolesAndPrivileges() {
                     return (
                       <div className="py-12 text-center text-[#863221]">
                         <p className="text-sm font-semibold">
-                          {reachable.length === 0 ? 'No modules are reachable from this role\u2019s rank.' : `No privileges match "${privilegeSearch}"`}
+                          {reachable.length === 0 ? 'No modules are available for this role.' : `No privileges match "${privilegeSearch}"`}
                         </p>
                         {reachable.length > 0 && (
                           <button onClick={() => setPrivilegeSearch('')} className="text-xs text-[#510601] hover:underline mt-1 font-medium">
@@ -1123,22 +1144,39 @@ export default function RolesAndPrivileges() {
                   );
 
                   // Direct / Needs approval: shown beside a ticked Write or Delete
-                  const ApprovalChoice = ({ id }) => {
-                    const needs = approvalRequiredCodes.includes(id);
+                  // Supports a single privilege ID or an array of child privileges for a parent row
+                  const ApprovalChoice = ({ codes }) => {
+                    const list = (Array.isArray(codes) ? codes : [codes]).filter(
+                      (c) => Boolean(c) && !String(c).startsWith('approvals.')
+                    );
+                    const activeList = list.filter((c) => isOn(c));
+                    if (activeList.length === 0) return null;
+
+                    const neededCount = activeList.filter((c) => approvalRequiredCodes.includes(c)).length;
+                    const isAllNeeded = neededCount === activeList.length;
+                    const isSomeNeeded = neededCount > 0 && !isAllNeeded;
+
                     return (
                       <button
                         type="button"
-                        onClick={() => handleToggleApprovalGate(id)}
-                        title={needs
-                          ? 'Needs approval: this role\u2019s actions here wait in the Approvals queue. Click to let them apply directly.'
-                          : 'Direct: this role\u2019s actions here apply at once. Click to make them need approval.'}
-                        className={`px-2 py-0.5 rounded-full border text-[10px] font-bold whitespace-nowrap transition-colors ${
-                          needs
+                        disabled={isReadOnly}
+                        onClick={() => handleToggleApprovalGate(activeList)}
+                        title={
+                          isAllNeeded
+                            ? 'Needs approval: actions here wait in Approvals queue. Click to set Direct.'
+                            : isSomeNeeded
+                              ? 'Partial: some actions need approval. Click to make all need approval.'
+                              : 'Direct: actions apply at once. Click to make them need approval.'
+                        }
+                        className={`px-2 py-0.5 rounded-full border text-[10px] font-bold whitespace-nowrap transition-colors cursor-pointer ${
+                          isAllNeeded
                             ? 'bg-[#FFF1C9] border-[#F2B600] text-[#7A4A00]'
-                            : 'bg-white border-[#E8DFD8] text-[#863221]/70 hover:border-[#863221]'
+                            : isSomeNeeded
+                              ? 'bg-[#FFF8E6] border-[#F2B600]/70 text-[#7A4A00] border-dashed'
+                              : 'bg-white border-[#E8DFD8] text-[#863221]/70 hover:border-[#863221]'
                         }`}
                       >
-                        {needs ? 'Needs approval' : 'Direct'}
+                        {isAllNeeded ? 'Needs approval' : isSomeNeeded ? 'Needs approval (Some)' : 'Direct'}
                       </button>
                     );
                   };
@@ -1181,9 +1219,6 @@ export default function RolesAndPrivileges() {
                                   <span className={r.hasChildren ? 'text-xs font-bold uppercase tracking-wide text-[#180200]' : 'text-sm font-medium text-[#180200]'}>
                                     {r.name}
                                   </span>
-                                  {r.min_rank_level != null && (
-                                    <span className="px-1.5 py-0.5 bg-[#FFC107]/20 text-[#863221] text-[9px] font-bold rounded">Rank {r.min_rank_level}+</span>
-                                  )}
                                   {r.disabled && (
                                     <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-bold rounded-full">Coming soon</span>
                                   )}
@@ -1203,6 +1238,9 @@ export default function RolesAndPrivileges() {
                               const codes = r.hasChildren ? colCodes(sub, col) : colCodes([r], col);
                               if (codes.length === 0) return <span className="text-[#D9CEC4]">–</span>;
                               const own = r.cells[col];
+                              const eligibleCodes = codes.filter((c) => Boolean(c) && !String(c).startsWith('approvals.'));
+                              const hasActivePrivileges = eligibleCodes.some((c) => isOn(c));
+
                               return (
                                 <div className="inline-flex items-center gap-2">
                                   <Box
@@ -1213,7 +1251,9 @@ export default function RolesAndPrivileges() {
                                       else applyPrivilegeBulk(codes, stateOf(codes, isOn) !== 'all');
                                     }}
                                   />
-                                  {!isReadOnly && own && col !== 'read' && isOn(own.id) && !String(own.id).startsWith('approvals.') && <ApprovalChoice id={own.id} />}
+                                  {!isReadOnly && col !== 'read' && hasActivePrivileges && (
+                                    <ApprovalChoice codes={eligibleCodes} />
+                                  )}
                                 </div>
                               );
                             };
@@ -1271,16 +1311,18 @@ export default function RolesAndPrivileges() {
                 </button>
 
                 {!isReadOnly && (
-                  <button
-                    type="button"
-                    onClick={handleSavePrivileges}
-                    disabled={savingPrivileges || !hasPermission('users.privileges.write')}
-                    title={!hasPermission('users.privileges.write') ? 'You need the users.privileges.write permission' : 'Save Privileges'}
-                    className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer disabled:opacity-60"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>{savingPrivileges ? 'Saving...' : 'Save Privileges'}</span>
-                  </button>
+                  hasPermission('users.privileges.write') && (
+                    <button
+                      type="button"
+                      onClick={handleSavePrivileges}
+                      disabled={savingPrivileges}
+                      title={'Save Privileges'}
+                      className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>{savingPrivileges ? 'Saving...' : 'Save Privileges'}</span>
+                    </button>
+                  )
                 )}
               </div>
 
@@ -1303,7 +1345,7 @@ export default function RolesAndPrivileges() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                   <Shield className="w-5 h-5" />
@@ -1332,7 +1374,6 @@ export default function RolesAndPrivileges() {
                   ? 'bg-[#3D705C]/10 text-[#3D705C] border border-[#3D705C]/20'
                   : 'bg-gray-100 text-gray-600 border border-gray-200'
                   }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${isRoleActive(viewingRole) ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                   {isRoleActive(viewingRole) ? 'Active' : 'Inactive'}
                 </span>
               </div>
@@ -1380,161 +1421,11 @@ export default function RolesAndPrivileges() {
               </div>
 
               {/* Read-only footer */}
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-[#E8DFD8]">
-                <button
-                  type="button"
-                  onClick={() => setViewingRole(null)}
-                  className="px-4 py-2 border border-[#E8DFD8] text-[#863221] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
+              <ModalFooter kind="view" onCancel={() => setViewingRole(null)} inForm />
 
             </div>
           </div>
         )}
-      </Modal>
-
-      {/* ============================================================ */}
-      {/* DELETE CONFIRMATION MODAL WITH PROTECTION                    */}
-      {/* ============================================================ */}
-      <Modal
-        isOpen={Boolean(deleteTargetRole)}
-        onClose={() => setDeleteTargetRole(null)}
-      >
-        {deleteTargetRole && (
-          <div
-            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {deleteTargetRole.usersCount > 0 || isSystemRole(deleteTargetRole) ? (
-              <>
-                <div className="w-14 h-14 rounded-full bg-amber-100 text-[#EE6A00] flex items-center justify-center mx-auto mb-3.5">
-                  <Lock className="w-7 h-7" />
-                </div>
-
-                <h3 className="text-lg font-bold text-[#180200]">
-                  Cannot Delete Role
-                </h3>
-                <p className="text-xs text-[#863221] mt-2 leading-relaxed">
-                  {(deleteTargetRole.isSystem || deleteTargetRole.is_all_access || deleteTargetRole.rank_level === 1) ? (
-                    <>
-                      <strong>{deleteTargetRole.name}</strong> is a core system role with all-access permissions and cannot be deleted.
-                    </>
-                  ) : (
-                    <>
-                      This role is currently assigned to <strong className="text-[#180200]">{deleteTargetRole.usersCount} users</strong> and cannot be deleted. Please reassign those users before deleting the role.
-                    </>
-                  )}
-                </p>
-
-                <div className="mt-6">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTargetRole(null)}
-                    className="w-full py-2.5 px-4 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
-                  >
-                    Understood
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="w-14 h-14 rounded-full bg-red-100 text-[#ED4636] flex items-center justify-center mx-auto mb-3.5">
-                  <Trash2 className="w-7 h-7" />
-                </div>
-
-                <h3 className="text-lg font-bold text-[#180200]">
-                  Delete Role?
-                </h3>
-                <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-                  Are you sure you want to delete role <strong className="text-[#180200]">{deleteTargetRole.name}</strong>? This action cannot be undone.
-                </p>
-
-                <div className="mt-6 flex items-center justify-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTargetRole(null)}
-                    className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteRole}
-                    className="w-full py-2.5 px-4 bg-[#ED4636] hover:bg-[#C93324] text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
-                  >
-                    Delete Role
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </Modal>
-
-      {/* ============================================================ */}
-      {/* ACTIVATE / DEACTIVATE CONFIRMATION MODAL                     */}
-      {/* ============================================================ */}
-      <Modal
-        isOpen={Boolean(statusDialog)}
-        onClose={() => setStatusDialog(null)}
-      >
-        {statusDialog && (() => {
-          const isTargetDeactivate = statusDialog.newStatus === false || statusDialog.newStatus === 'Inactive';
-          return (
-            <div
-              className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3.5 ${
-                isTargetDeactivate ? 'bg-red-100 text-[#ED4636]' : 'bg-[#3D705C]/10 text-[#3D705C]'
-              }`}>
-                {isTargetDeactivate ? (
-                  <AlertTriangle className="w-7 h-7" />
-                ) : (
-                  <CheckCircle2 className="w-7 h-7" />
-                )}
-              </div>
-
-              <h3 className="text-lg font-bold text-[#180200]">
-                {isTargetDeactivate ? 'Deactivate Role?' : 'Activate Role?'}
-              </h3>
-              <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-                {isTargetDeactivate ? (
-                  <>
-                    Are you sure you want to deactivate <strong className="text-[#180200]">{statusDialog.role.name}</strong>? Inactive roles cannot be assigned to new user accounts.
-                  </>
-                ) : (
-                  <>
-                    Are you sure you want to activate <strong className="text-[#180200]">{statusDialog.role.name}</strong>? It will become available for assignment to user accounts.
-                  </>
-                )}
-              </p>
-
-              <div className="mt-6 flex items-center justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setStatusDialog(null)}
-                  className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmStatusToggle}
-                  className={`w-full py-2.5 px-4 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer ${
-                    isTargetDeactivate
-                      ? 'bg-[#ED4636] hover:bg-[#C93324]'
-                      : 'bg-[#3D705C] hover:bg-[#2F5647]'
-                  }`}
-                >
-                  {isTargetDeactivate ? 'Deactivate' : 'Activate'}
-                </button>
-              </div>
-            </div>
-          );
-        })()}
       </Modal>
 
     </div>

@@ -7,37 +7,33 @@ import { notify } from '../utils/notify';
 import {
   Printer,
   Search,
-  Trash2,
   CheckCircle2,
   X,
   AlertCircle,
-  AlertTriangle,
   RefreshCw,
-  ChevronRight,
-  ChevronLeft,
   User,
-  Phone,
-  MapPin,
-  Calendar,
   CheckSquare,
-  Square,
-  Building,
   FileText,
-  SlidersHorizontal,
-  Download
 } from 'lucide-react';
-import { loadMembers, loadMembershipTypes, loadReceipts } from '../utils/serverData';
+import { loadMembershipTypes } from '../utils/serverData';
+import { fetchLabelPage } from '../utils/apiAdapters';
+import Pager from '../components/Pager';
 import { formatDate } from '../utils/dateUtils';
 import api from '../api';
 import { askForm } from '../utils/dialogs';
 import useAuth from '../hooks/useAuth';
+import ModalFooter from '../components/ModalFooter';
 
 export default function LabelList() {
   const { hasPermission } = useAuth();
   // Synchronized stores
   // Label list = members that have a receipt mapped to them (paid members), all read from the server
   const [labelList, setLabelList] = useState([]);
-  const [members, setMembers] = useState([]);
+  const [members, setMembers] = useState([]); // the members of the page on screen
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [loadingPage, setLoadingPage] = useState(true);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [membershipTypes, setMembershipTypes] = useState([]);
 
   // Search & Filter
@@ -51,7 +47,7 @@ export default function LabelList() {
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(25);
 
   // Print Preview Modal
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
@@ -64,72 +60,56 @@ export default function LabelList() {
     notify(message, type);
   };
 
-  const loadLabelData = async (typeId) => {
+  // what the server is asked for: the page, the search, the type and the last-receipt dates.
+  const labelParams = () => ({
+    ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+    ...(membershipTypeFilter !== 'ALL' ? { membership_type_id: membershipTypeFilter } : {}),
+    ...(fromDateFilter ? { from_date: fromDateFilter } : {}),
+    ...(toDateFilter ? { to_date: toDateFilter } : {}),
+  });
+  const requestSeq = useRef(0);
+  const loadLabelData = async () => {
+    const seq = (requestSeq.current += 1);
+    setLoadingPage(true);
     try {
-      const [mems, recs, types] = await Promise.all([
-        loadMembers({ limit: 5000, ...(typeId && typeId !== 'ALL' ? { membership_type_id: typeId } : {}) }),
-        loadReceipts({ limit: 5000 }),
-        loadMembershipTypes()
-      ]);
-      const lastReceiptDate = new Map();
-      recs.forEach((r) => {
-        if (r.memberId == null) return;
-        const prev = lastReceiptDate.get(r.memberId);
-        if (!prev || String(r.receiptDate) > prev) lastReceiptDate.set(r.memberId, String(r.receiptDate || ''));
-      });
-      setMembers(mems);
-      setMembershipTypes(types);
-      setLabelList(
-        [...lastReceiptDate.entries()].map(([memberId, addedDate]) => ({ id: memberId, memberId, addedDate }))
-      );
+      const result = await fetchLabelPage({ ...labelParams(), page: currentPage, limit: pageSize });
+      if (seq !== requestSeq.current) return;
+      setMembers(result.rows);
+      setTotal(result.total);
+      setPages(Math.max(1, result.pages));
+      setLabelList(result.rows.map((m) => ({ id: m.id, memberId: m.id, addedDate: m.last_receipt_date || '' })));
+      if (currentPage > Math.max(1, result.pages)) setCurrentPage(Math.max(1, result.pages));
     } catch (error) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load label list.', error);
       showToast(error.response?.data?.detail || 'Failed to load the label list from the server.', 'error');
+    } finally {
+      if (seq === requestSeq.current) setLoadingPage(false);
     }
   };
 
-  // the membership-type filter is applied by the server
   useEffect(() => {
-    loadLabelData(membershipTypeFilter);
-  }, [membershipTypeFilter]);
+    loadMembershipTypes().then(setMembershipTypes).catch(() => {});
+  }, []);
+  const filterKey = [debouncedSearch, membershipTypeFilter, fromDateFilter, toDateFilter].join('|');
+  useEffect(() => {
+    loadLabelData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, currentPage, pageSize]);
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterKey, pageSize]);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), 350);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
-  // Helper lookups
-  const getMember = (memberId) => members.find((m) => m.id === memberId);
-  const getMembershipType = (typeId) => membershipTypes.find((mt) => mt.id === typeId);
+  // members ticked on any page stay printable
+  const selectedCache = useRef(new Map()); // id -> { item, member }
+  const getMember = (memberId) => members.find((m) => m.id === memberId) || selectedCache.current.get(memberId)?.member;
 
-  // Filtered list
-  const filteredList = useMemo(() => {
-    return labelList.filter((item) => {
-      const member = getMember(item.memberId);
-      if (!member) return false;
-
-      // Search
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase().trim();
-        const matchesName = String(member.fullName ?? '').toLowerCase().includes(q);
-        const matchesNo = String(member.membershipNumber ?? '').toLowerCase().includes(q);
-        const matchesPhone = String(member.mobile ?? '').includes(q);
-        const matchesCity = (member.talukName || '').toLowerCase().includes(q) || (member.districtName || '').toLowerCase().includes(q);
-
-        if (!matchesName && !matchesNo && !matchesPhone && !matchesCity) {
-          return false;
-        }
-      }
-
-      // Date added
-      if (fromDateFilter && item.addedDate < fromDateFilter) return false;
-      if (toDateFilter && item.addedDate > toDateFilter) return false;
-
-      return true;
-    });
-  }, [labelList, members, searchQuery, membershipTypeFilter, fromDateFilter, toDateFilter]);
-
-  // Paginated List
-  const totalPages = Math.ceil(filteredList.length / pageSize) || 1;
-  const paginatedList = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return filteredList.slice(start, start + pageSize);
-  }, [filteredList, currentPage, pageSize]);
+  // the server already searched, filtered and paged them
+  const paginatedList = labelList;
 
   // Selection handlers
   const isAllSelected = useMemo(() => {
@@ -137,38 +117,39 @@ export default function LabelList() {
     return paginatedList.every((item) => selectedIds.includes(item.id));
   }, [paginatedList, selectedIds]);
 
+  const remember = (item) => {
+    const member = members.find((m) => m.id === item.memberId);
+    if (member) selectedCache.current.set(item.id, { item, member });
+  };
+
   const handleToggleSelectAll = () => {
     if (isAllSelected) {
-      // Unselect only current page items
       const currentIds = paginatedList.map((i) => i.id);
       setSelectedIds((prev) => prev.filter((id) => !currentIds.includes(id)));
     } else {
-      // Select all current page items
+      paginatedList.forEach(remember);
       const currentIds = paginatedList.map((i) => i.id);
       setSelectedIds((prev) => Array.from(new Set([...prev, ...currentIds])));
     }
   };
 
   const handleToggleSelectItem = (id) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-    );
-  };
-
-  const handleSelectAllAcrossAllPages = () => {
-    const allFilteredIds = filteredList.map((i) => i.id);
-    setSelectedIds(allFilteredIds);
+    setSelectedIds((prev) => {
+      if (prev.includes(id)) return prev.filter((item) => item !== id);
+      const item = labelList.find((i) => i.id === id);
+      if (item) remember(item);
+      return [...prev, id];
+    });
   };
 
   const handleClearSelection = () => {
     setSelectedIds([]);
   };
 
-
   // Get items for printing
   const itemsToPrint = useMemo(() => {
-    return labelList.filter((item) => selectedIds.includes(item.id));
-  }, [labelList, selectedIds]);
+    return selectedIds.map((id) => selectedCache.current.get(id)?.item).filter(Boolean);
+  }, [selectedIds]);
 
   // Generate a label batch on the server (paid members only) and download its PDF
   const handleGenerateBatch = async () => {
@@ -227,7 +208,7 @@ export default function LabelList() {
       {/* Toast Alert */}
       {toast.show && (
         <div
-          className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-lg px-4 py-3 shadow-lg transition-all animate-bounce ${
+          className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-xl px-4 py-3 shadow-lg transition-all animate-bounce ${
             toast.type === 'success'
               ? 'bg-[#3D705C] text-white'
               : toast.type === 'info'
@@ -243,113 +224,108 @@ export default function LabelList() {
           <span className="text-sm font-medium">{toast.message}</span>
           <button
             onClick={() => setToast({ show: false, message: '', type: 'success' })}
-            className="ml-2 rounded p-1 hover:bg-white/20"
+            className="ml-2 rounded-lg p-1 hover:bg-white/20 cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
       )}
 
-      {/* Header & Breadcrumb */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-<h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-            Label List
-          </h1>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="flex items-center gap-3">
+      {/* Action Buttons Toolbar */}
+      <div className="flex flex-wrap items-center justify-end gap-3 -mb-2">
+        {hasPermission('members.list.read') && (
           <Link
             to="/dashboard/membership/list"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-3.5 py-2 text-xs font-medium text-gray-700 hover:bg-stone-50 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#E8DFD8] bg-white px-3.5 py-2 text-xs font-semibold text-[#863221] hover:bg-[#FAF7F2] shadow-xs transition-colors"
           >
             <User className="h-4 w-4 text-[#8C1801]" />
             <span>Membership List</span>
           </Link>
+        )}
 
+        {hasPermission('magazines.write') && (
           <button
             type="button"
             onClick={handleGenerateBatch}
-            disabled={!hasPermission('magazines.write')}
-            title={!hasPermission('magazines.write') ? 'Requires magazines.write permission' : 'Generate a label batch (PDF) for paid members'}
-            className="inline-flex items-center gap-2 rounded-lg border border-[#E8DFD8] bg-white px-4 py-2 text-sm font-medium text-[#510601] shadow-sm hover:bg-[#FAF7F2] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="Generate a label batch (PDF) for paid members"
+            className="inline-flex items-center gap-2 rounded-xl border border-[#E8DFD8] bg-white px-4 py-2 text-xs font-semibold text-[#510601] shadow-xs hover:bg-[#FAF7F2] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             <Printer className="h-4 w-4" />
             <span>Generate Batch (PDF)</span>
           </button>
+        )}
 
-          <button
-            type="button"
-            disabled={selectedIds.length === 0}
-            onClick={() => setIsPrintModalOpen(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-[#8C1801] px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-[#510601] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            <Printer className="h-4 w-4" />
-            <span>Print Labels</span>
-            {selectedIds.length > 0 && (
-              <span className="ml-1 inline-flex items-center justify-center rounded-full bg-[#FFC107] px-2 py-0.5 text-xs font-bold text-[#180200]">
-                {selectedIds.length}
-              </span>
-            )}
-          </button>
-        </div>
+        <button
+          type="button"
+          disabled={selectedIds.length === 0}
+          onClick={() => setIsPrintModalOpen(true)}
+          className="inline-flex items-center gap-2 rounded-xl bg-[#510601] px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-[#3D0400] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+        >
+          <Printer className="h-4 w-4" />
+          <span>Print Labels</span>
+          {selectedIds.length > 0 && (
+            <span className="ml-1 inline-flex items-center justify-center rounded-full bg-[#FFC107] px-2 py-0.5 text-[10px] font-bold text-[#180200]">
+              {selectedIds.length}
+            </span>
+          )}
+        </button>
       </div>
 
-      {/* Summary Cards */}
+      {/* Summary KPI Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+        <div className="rounded-2xl border border-[#E8DFD8] bg-white p-5 shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)]">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium uppercase tracking-wider text-gray-500">
+            <span className="text-xs font-bold uppercase tracking-wider text-[#863221]">
               Total In Queue
             </span>
-            <div className="rounded-lg bg-amber-50 p-2 text-[#8C1801]">
+            <div className="rounded-xl bg-amber-50 p-2 text-[#8C1801] border border-amber-200">
               <Printer className="h-5 w-5" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="text-2xl font-bold text-[#180200]">{labelList.length}</span>
-            <span className="text-xs text-gray-500">Ready to print</span>
+          <div className="mt-3 flex items-baseline justify-between">
+            <span className="text-2xl font-bold font-mono text-[#180200]">{total}</span>
+            <span className="text-xs text-[#863221]/70">Ready to print</span>
           </div>
         </div>
 
-        <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+        <div className="rounded-2xl border border-[#E8DFD8] bg-white p-5 shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)]">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium uppercase tracking-wider text-gray-500">
+            <span className="text-xs font-bold uppercase tracking-wider text-[#863221]">
               Selected for Printing
             </span>
-            <div className="rounded-lg bg-emerald-50 p-2 text-emerald-700">
+            <div className="rounded-xl bg-emerald-50 p-2 text-[#3D705C] border border-emerald-200">
               <CheckSquare className="h-5 w-5" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="text-2xl font-bold text-emerald-700">{selectedIds.length}</span>
-            <span className="text-xs font-medium text-emerald-600">
-              {labelList.length ? `${Math.round((selectedIds.length / labelList.length) * 100)}% of queue` : '0%'}
+          <div className="mt-3 flex items-baseline justify-between">
+            <span className="text-2xl font-bold font-mono text-[#3D705C]">{selectedIds.length}</span>
+            <span className="text-xs font-semibold text-[#3D705C]">
+              {total ? `${Math.round((selectedIds.length / total) * 100)}% of queue` : '0%'}
             </span>
           </div>
         </div>
 
-        <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+        <div className="rounded-2xl border border-[#E8DFD8] bg-white p-5 shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)]">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium uppercase tracking-wider text-gray-500">
-              Total Members
+            <span className="text-xs font-bold uppercase tracking-wider text-[#863221]">
+              In Current View
             </span>
-            <div className="rounded-lg bg-stone-100 p-2 text-stone-700">
+            <div className="rounded-xl bg-[#FAF7F2] p-2 text-[#510601] border border-[#E8DFD8]">
               <User className="h-5 w-5" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="text-2xl font-bold text-stone-800">
+          <div className="mt-3 flex items-baseline justify-between">
+            <span className="text-2xl font-bold font-mono text-[#180200]">
               {members.length}
             </span>
-            <span className="text-xs text-gray-500">Registered members</span>
+            <span className="text-xs text-[#863221]/70">Displaying on page</span>
           </div>
         </div>
       </div>
 
       {/* Search & Filter Bar */}
       <SearchFilterBar
+        title="Label List"
         searchQuery={searchQuery}
         onSearchChange={(val) => {
           setSearchQuery(val);
@@ -371,7 +347,7 @@ export default function LabelList() {
               <button
                 type="button"
                 onClick={handleClearSelection}
-                className="ml-1 text-xs underline text-[#863221] hover:text-[#510601]"
+                className="ml-1 text-xs underline text-[#863221] hover:text-[#510601] cursor-pointer"
               >
                 Clear
               </button>
@@ -395,10 +371,10 @@ export default function LabelList() {
       </SearchFilterBar>
 
       {/* Label List Table */}
-      <div className="overflow-hidden rounded-xl border border-stone-200 bg-white shadow-sm">
+      <div className="overflow-hidden rounded-2xl border border-[#E8DFD8] bg-white shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)]">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm text-gray-700">
-            <thead className="bg-[#FAF7F2] border-b border-stone-200 text-xs font-semibold uppercase tracking-wider text-[#180200]">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-[11px] font-bold uppercase tracking-wider text-[#863221]">
               <tr>
                 {/* Select All Checkbox */}
                 <th className="w-12 px-4 py-3.5 text-center">
@@ -407,35 +383,44 @@ export default function LabelList() {
                     checked={isAllSelected}
                     onChange={handleToggleSelectAll}
                     aria-label="Select all members on this page"
-                    className="h-4 w-4 rounded border-stone-300 text-[#8C1801] focus:ring-[#8C1801]"
+                    className="h-4 w-4 rounded border-[#E8DFD8] text-[#510601] focus:ring-[#510601] cursor-pointer"
                   />
                 </th>
-                <th className="px-4 py-3.5">Member Name</th>
-                <th className="px-4 py-3.5">Membership Number</th>
-                <th className="px-4 py-3.5">Membership Type</th>
-                <th className="px-4 py-3.5">Mobile Number</th>
-                <th className="px-4 py-3.5 min-w-[240px]">Postal Address</th>
-                <th className="px-4 py-3.5">Added Date</th>
-                <th className="px-4 py-3.5 text-center">Actions</th>
+                <th className="py-3 px-4">Name</th>
+                <th className="py-3 px-4">Member No.</th>
+                <th className="py-3 px-4">Type</th>
+                <th className="py-3 px-4">Mobile</th>
+                <th className="py-3 px-4 min-w-[240px]">Address</th>
+                <th className="py-3 px-4">Added On</th>
+                <th className="py-3 px-4 text-center">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-stone-200">
-              {paginatedList.length === 0 ? (
+            <tbody className="divide-y divide-[#E8DFD8]">
+              {loadingPage ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-gray-500">
+                  <td colSpan={8} className="py-12 text-center text-[#863221]">
+                    <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-[#510601]" />
+                    Loading label list...
+                  </td>
+                </tr>
+              ) : paginatedList.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-12 text-center text-[#863221]">
                     <div className="flex flex-col items-center justify-center space-y-2">
-                      <Printer className="h-10 w-10 text-stone-300" />
-                      <p className="text-base font-medium text-gray-700">No members in label list</p>
-                      <p className="text-xs text-gray-500">
+                      <Printer className="h-10 w-10 text-[#863221]/30" />
+                      <p className="text-sm font-semibold text-[#180200]">No members in label list</p>
+                      <p className="text-xs text-[#863221]/70">
                         Select members from the Membership List to add to the label printing queue.
                       </p>
-                      <Link
-                        to="/dashboard/membership/list"
-                        className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#8C1801] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#510601]"
-                      >
-                        <User className="h-3.5 w-3.5" />
-                        <span>Go to Membership List</span>
-                      </Link>
+                      {hasPermission('members.list.read') && (
+                        <Link
+                          to="/dashboard/membership/list"
+                          className="mt-2 inline-flex items-center gap-1.5 rounded-xl bg-[#510601] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#3D0400] transition-colors"
+                        >
+                          <User className="h-3.5 w-3.5" />
+                          <span>Go to Membership List</span>
+                        </Link>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -450,8 +435,8 @@ export default function LabelList() {
                   return (
                     <tr
                       key={item.id}
-                      className={`hover:bg-amber-50/40 transition-colors ${
-                        isSelected ? 'bg-amber-50/70' : ''
+                      className={`hover:bg-[#FAF7F2]/60 transition-colors ${
+                        isSelected ? 'bg-amber-50/60' : ''
                       }`}
                     >
                       {/* Individual Checkbox */}
@@ -461,58 +446,60 @@ export default function LabelList() {
                           checked={isSelected}
                           onChange={() => handleToggleSelectItem(item.id)}
                           aria-label={`Select ${member.fullName}`}
-                          className="h-4 w-4 rounded border-stone-300 text-[#8C1801] focus:ring-[#8C1801]"
+                          className="h-4 w-4 rounded border-[#E8DFD8] text-[#510601] focus:ring-[#510601] cursor-pointer"
                         />
                       </td>
 
                       {/* Member Name */}
                       <td className="px-4 py-3.5">
-                        <div className="font-semibold text-gray-900">{member.fullName}</div>
+                        <div className="font-semibold text-[#180200]">{member.fullName}</div>
                       </td>
 
                       {/* Membership Number */}
-                      <td className="px-4 py-3.5 font-mono text-xs font-medium text-gray-800">
+                      <td className="px-4 py-3.5 font-mono text-xs font-bold text-[#510601]">
                         {member.membershipNumber}
                       </td>
 
                       {/* Membership Type */}
                       <td className="px-4 py-3.5 text-xs">
-                        <span className="inline-flex items-center rounded-md bg-stone-100 px-2 py-1 text-xs font-medium text-stone-800">
+                        <span className="inline-flex items-center rounded-full bg-[#FAF7F2] border border-[#E8DFD8] px-2.5 py-0.5 text-[10px] font-bold text-[#863221]">
                           {memType?.name || '—'}
                         </span>
                       </td>
 
                       {/* Mobile Number */}
-                      <td className="px-4 py-3.5 font-mono text-xs text-gray-700">
+                      <td className="px-4 py-3.5 font-mono text-xs text-[#863221]">
                         {member.mobile}
                       </td>
 
                       {/* Full Address */}
-                      <td className="px-4 py-3.5 text-xs text-gray-700 leading-relaxed">
+                      <td className="px-4 py-3.5 text-xs text-[#180200] leading-relaxed">
                         <div>{member.addressLine || '—'}</div>
-                        <div className="text-gray-500 text-[11px]">
+                        <div className="text-[#863221] text-[11px]">
                           {member.talukName}, {member.districtName}, {member.stateName} -{' '}
-                          <span className="font-mono font-semibold text-gray-800">
+                          <span className="font-mono font-bold text-[#180200]">
                             {member.postalCode}
                           </span>
                         </div>
                       </td>
 
                       {/* Added Date */}
-                      <td className="px-4 py-3.5 text-xs text-gray-600">
+                      <td className="px-4 py-3.5 text-xs text-[#863221]">
                         {formatDate(item.addedDate)}
                       </td>
 
                       {/* Actions */}
                       <td className="px-4 py-3.5 text-center">
-                        <Link
-                          to="/dashboard/receipts/tracking"
-                          title="Receipts decide who is on the label list"
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-colors"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          <span>View receipts</span>
-                        </Link>
+                        {hasPermission('receipts.tracking.read') && (
+                          <Link
+                            to="/dashboard/receipts/tracking"
+                            title="Receipts decide who is on the label list"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#863221] bg-[#FAF7F2] hover:bg-[#E8DFD8] border border-[#E8DFD8] rounded-lg transition-colors cursor-pointer"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-[#510601]" />
+                            <span>View receipts</span>
+                          </Link>
+                        )}
                       </td>
                     </tr>
                   );
@@ -522,138 +509,78 @@ export default function LabelList() {
           </table>
         </div>
 
-        {/* Table Footer */}
-        <div className="flex flex-col items-center justify-between gap-3 border-t border-stone-200 bg-[#FAF7F2]/60 px-4 py-3 sm:flex-row text-xs text-gray-600">
-          <div>
-            Showing <span className="font-semibold">{paginatedList.length}</span> of{' '}
-            <span className="font-semibold">{filteredList.length}</span> queued members
+        {/* Table Footer: the server pages the list */}
+        {total > 0 && (
+          <div className="border-t border-[#E8DFD8] bg-[#FAF7F2]/40 px-4 py-3">
+            <Pager page={currentPage} pages={pages} total={total} pageSize={pageSize} onPage={setCurrentPage} onPageSize={setPageSize} />
           </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">Rows per page:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setCurrentPage(1);
-              }}
-              className="rounded border border-stone-200 bg-white px-2 py-1 text-xs focus:outline-none"
-            >
-              <option value={5}>5</option>
-              <option value={10}>10</option>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-            </select>
-
-            <div className="ml-2 flex items-center space-x-1">
-              <button
-                disabled={currentPage === 1}
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                className="rounded border border-stone-200 bg-white p-1 text-gray-600 hover:bg-stone-50 disabled:opacity-40"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <span className="px-2 font-medium text-gray-800">
-                {currentPage} / {totalPages}
-              </span>
-              <button
-                disabled={currentPage === totalPages}
-                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                className="rounded border border-stone-200 bg-white p-1 text-gray-600 hover:bg-stone-50 disabled:opacity-40"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* ========================================================= */}
-      {/* 10, 11. PRINT PREVIEW / PRINTABLE LABELS MODAL            */}
+      {/* PRINT PREVIEW / PRINTABLE LABELS MODAL                    */}
       {/* ========================================================= */}
       <Modal isOpen={isPrintModalOpen} onClose={() => setIsPrintModalOpen(false)}>
-        <div className="relative w-full max-w-4xl rounded-2xl bg-white shadow-2xl border border-stone-200 overflow-hidden max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+        <div className="relative w-full max-w-4xl rounded-2xl bg-white shadow-2xl border border-[#E8DFD8] overflow-hidden max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
           {/* Modal Header */}
-          <div className="flex items-center justify-between border-b border-stone-200 bg-[#FAF7F2] px-6 py-4 print:hidden no-print">
-            <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-[#8C1801] p-2 text-white">
+          <div className="flex items-center justify-between border-b border-[#E8DFD8] bg-[#FAF7F2] px-6 py-4 print:hidden no-print">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-[#510601] p-2 text-white">
                 <Printer className="h-5 w-5" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-[#180200]">
+                <h3 className="text-base font-bold text-[#180200]">
                   Print Member Labels
                 </h3>
-                <p className="text-xs text-gray-600">
+                <p className="text-xs text-[#863221]">
                   {itemsToPrint.length} label{itemsToPrint.length !== 1 ? 's' : ''} ready for dispatch printing
                 </p>
               </div>
             </div>
             <button
               onClick={() => setIsPrintModalOpen(false)}
-              className="rounded-lg p-1 text-gray-400 hover:bg-stone-200 hover:text-gray-700"
+              className="rounded-lg p-1 text-[#863221]/60 hover:bg-[#FAF7F2] hover:text-[#510601] cursor-pointer"
             >
               <X className="h-5 w-5" />
             </button>
           </div>
 
           {/* Modal Printable Body */}
-          <div className="flex-1 overflow-y-auto p-6 bg-stone-100/60 print:bg-white print:p-0" ref={printAreaRef}>
-            <div className="mb-4 flex items-center gap-2.5 rounded-lg bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200 print:hidden no-print">
-              <AlertCircle className="h-4 w-4 shrink-0 text-amber-700" />
+          <div className="flex-1 overflow-y-auto p-6 bg-[#FAF7F2]/40 print:bg-white print:p-0" ref={printAreaRef}>
+            <div className="mb-4 flex items-center gap-2.5 rounded-xl bg-amber-50 p-3 text-xs text-amber-900 border border-amber-200 print:hidden no-print">
+              <AlertCircle className="h-4 w-4 shrink-0 text-[#EE6A00]" />
               <span>
-                Clean, high-contrast label formatting suitable for standard sheet sticker printing (2 columns).
+                A4 sticker sheet, 3 columns x 7 rows: membership number, name and address on each label.
               </span>
             </div>
 
-            {/* Labels Grid (2 columns Avery style) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 print:grid-cols-2 print:gap-4">
+            {/* Labels Grid: 3 across, no gaps */}
+            <div className="label-sheet grid grid-cols-1 md:grid-cols-3 gap-0 print:grid-cols-3 print:gap-0">
               {itemsToPrint.map((item) => {
                 const member = getMember(item.memberId);
-                const memType = membershipTypeFilter !== 'ALL' ? membershipTypes.find((mt) => String(mt.id) === String(membershipTypeFilter)) : null;
                 if (!member) return null;
 
                 return (
                   <div
                     key={item.id}
-                    className="printable-label-card rounded-lg border-2 border-dashed border-stone-400 bg-white p-4 shadow-sm relative flex flex-col justify-between"
-                    style={{ minHeight: '180px' }}
+                    className="printable-label-card border border-[#E8DFD8] bg-white px-3 py-2.5 relative"
+                    style={{ minHeight: '42.4mm' }}
                   >
-                    {/* Organization Header */}
-                    <div className="border-b border-stone-200 pb-1.5 mb-2 flex items-center justify-between">
-                      <div className="font-bold text-xs tracking-wider text-[#8C1801] uppercase">
-                        Havyaka MahaSabha
+                    {/* Recipient Details: membership number, name in bold, address */}
+                    <div className="leading-tight text-black">
+                      <div className="text-[12px] mb-0.5 font-mono font-bold text-[#510601]">
+                        {member.membershipNumber}
                       </div>
-                      <span className="font-mono text-[10px] bg-stone-100 text-stone-700 px-1.5 py-0.5 rounded font-bold">
-                        {memType?.name || 'Member'}
-                      </span>
-                    </div>
-
-                    {/* Recipient Details */}
-                    <div className="text-xs space-y-1 text-gray-900 flex-1">
-                      <div className="font-bold text-sm text-[#180200]">
-                        To: {member.fullName}
+                      <div className="font-bold text-[12px] mb-0.5 uppercase text-[#180200]">
+                        {member.fullName}
                       </div>
-                      <div className="text-[11px] text-gray-600 font-mono font-medium">
-                        ID: {member.membershipNumber}
-                      </div>
-                      <div className="text-xs text-gray-800 leading-snug pt-1">
+                      <div className="text-[13px] leading-snug text-[#180200]">
                         {member.addressLine}
                         <br />
-                        {member.talukName}, {member.districtName}
+                        {[member.talukName, member.districtName].filter(Boolean).join(', ')}
                         <br />
-                        {member.stateName} - <span className="font-bold font-mono">{member.postalCode}</span>
+                        {member.stateName} - <span className="font-semibold font-mono">{member.postalCode}</span>
                       </div>
-                    </div>
-
-                    {/* Footer / Mobile */}
-                    <div className="border-t border-stone-200 pt-1.5 mt-2 flex items-center justify-between text-[11px] text-gray-600">
-                      <span className="flex items-center gap-1 font-mono">
-                        <Phone className="h-3 w-3 text-stone-400" />
-                        Ph: {member.mobile}
-                      </span>
-                      <span className="text-[10px] text-stone-400">
-                        HMS Dispatch
-                      </span>
                     </div>
                   </div>
                 );
@@ -662,35 +589,17 @@ export default function LabelList() {
           </div>
 
           {/* Modal Actions */}
-          <div className="flex items-center justify-between border-t border-stone-200 bg-white px-6 py-4 print:hidden no-print">
-            <span className="text-xs text-gray-500">
-              Total {itemsToPrint.length} label{itemsToPrint.length !== 1 ? 's' : ''} to print
-            </span>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setIsPrintModalOpen(false)}
-                className="rounded-lg border border-stone-200 px-4 py-2 text-xs font-medium text-gray-700 hover:bg-stone-50"
-              >
-                Close
-              </button>
-              <button
-                type="button"
-                onClick={handleTriggerPrint}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#8C1801] px-5 py-2 text-xs font-medium text-white hover:bg-[#510601] shadow-sm transition-colors"
-              >
-                <Printer className="h-4 w-4" />
-                <span>Send to Printer</span>
-              </button>
-            </div>
-          </div>
+          <ModalFooter
+            kind="confirm"
+            cancelLabel="Close"
+            submitLabel="Send to Printer"
+            onCancel={() => setIsPrintModalOpen(false)}
+            onSubmit={handleTriggerPrint}
+            className="print:hidden no-print"
+            left={<span className="text-xs font-semibold text-[#863221]">Total {itemsToPrint.length} label{itemsToPrint.length !== 1 ? 's' : ''} to print</span>}
+          />
         </div>
       </Modal>
-
-      {/* ========================================================= */}
-      {/* 12. REMOVE CONFIRMATION DIALOG                            */}
-      {/* ========================================================= */}
-
     </div>
   );
 }

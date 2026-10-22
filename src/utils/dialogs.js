@@ -10,8 +10,6 @@ const esc = (v) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-const INPUT_CLASS =
-  'width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #E8DFD8;border-radius:12px;font-size:14px;margin-top:4px;background:#fff;color:#180200';
 
 // Asks for a reason. Resolves with the text, or null when cancelled.
 export const askReason = async ({ title, text, confirmText = 'Confirm', danger = false }) => {
@@ -34,12 +32,12 @@ export const askReason = async ({ title, text, confirmText = 'Confirm', danger =
 };
 
 // Simple yes/no confirmation. Resolves true / false.
-export const confirmYesNo = async ({ title, text, confirmText = 'Yes', danger = false }) => {
+export const confirmYesNo = async ({ title, text, confirmText = 'Yes', danger = false, info = false }) => {
   const res = await Swal.fire({
     title,
     text,
-    icon: danger ? 'warning' : 'question',
-    showCancelButton: true,
+    icon: info ? 'info' : danger ? 'warning' : 'question',
+    showCancelButton: !info,
     confirmButtonText: confirmText,
     confirmButtonColor: danger ? DANGER : BRAND,
     cancelButtonColor: '#863221',

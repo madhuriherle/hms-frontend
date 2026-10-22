@@ -1,5 +1,5 @@
+import FilterToggle from '../components/FilterToggle';
 import React, { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import Modal from '../components/Modal';
 import {
   Plus,
@@ -12,38 +12,27 @@ import {
   CheckCircle2,
   X,
   AlertCircle,
-  AlertTriangle,
   RefreshCw,
-  Copy,
   Check,
-  SlidersHorizontal
+  SlidersHorizontal,
 } from 'lucide-react';
 import api from '../api';
 import { notify } from '../utils/notify';
 import { formatPaymentModeLabel } from '../utils/displayHelpers';
-import { loadReceipts } from '../utils/serverData';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
 
+import ModalFooter from '../components/ModalFooter';
 export default function BankDetailsManagement() {
   const { hasPermission } = useAuth();
 
   // Master state
   const [paymentConfigs, setPaymentConfigs] = useState([]);
-  const [receipts, setReceipts] = useState([]);
   const [banks, setBanks] = useState([]);
 
   // Dropdown options and bank details come from the Bank master / existing payment modes
   const AVAILABLE_BANK_ACCOUNTS = useMemo(() => [...new Set(banks.map((b) => b.name_en))], [banks]);
-  const BANK_DETAILS_LOOKUP = useMemo(() => {
-    const map = {};
-    banks.forEach((b) => {
-      if (!map[b.name_en]) {
-        map[b.name_en] = { branch: b.branch_name || '', ifscCode: b.ifsc_code || '', accountNumber: b.account_number || '' };
-      }
-    });
-    return map;
-  }, [banks]);
   const AVAILABLE_PAYMENT_MODES = useMemo(
     () => [...new Set(paymentConfigs.map((c) => c.paymentMode).filter(Boolean))],
     [paymentConfigs]
@@ -58,7 +47,7 @@ export default function BankDetailsManagement() {
   const [pageSize, setPageSize] = useState(10);
 
   // Copied helper
-  const [copiedId, setCopiedId] = useState(null);
+  const [] = useState(null);
 
   // Modal States
   const [isAddEditOpen, setIsAddEditOpen] = useState(false);
@@ -83,7 +72,6 @@ export default function BankDetailsManagement() {
   // Status Toggle Confirmation Dialog State
   const [statusDialog, setStatusDialog] = useState(null); // { item, newStatus }
   const [deleteDialog, setDeleteDialog] = useState(null); // payment mode to delete
-  const [blockedDialog, setBlockedDialog] = useState(null); // payment mode that receipts still use
 
   // Toast / Feedback State
   const [toastMessage, setToastMessage] = useState(null);
@@ -117,30 +105,15 @@ export default function BankDetailsManagement() {
       });
       setPaymentConfigs(mapped);
     } catch(err) {
-      console.error(err);
+      console.error(err); showToast(err.response?.data?.detail || 'Could not load data from the server.', 'error');
     }
   };
 
   useEffect(() => {
     fetchConfigs();
-    loadReceipts({ limit: 25000 })
-      .then(setReceipts)
-      .catch((error) => showToast(error.response?.data?.detail || 'Failed to load receipts from the server.', 'error'));
   }, []);
 
 
-
-  // Receipts count per payment mode label
-  const usageCountMap = useMemo(() => {
-    const map = {};
-    receipts.forEach((r) => {
-      const mode = (r.paymentMode || '').trim();
-      if (mode) {
-        map[mode] = (map[mode] || 0) + 1;
-      }
-    });
-    return map;
-  }, [receipts]);
 
   // ----------------------------------------------------
   // SEARCH & FILTERING
@@ -152,6 +125,7 @@ export default function BankDetailsManagement() {
   };
 
   const hasActiveFilters = searchQuery !== '' || statusFilter !== 'ALL';
+  const [filtersOpen, setFiltersOpen] = useState(false); // the filters show only when the filter icon is clicked
 
   const filteredData = useMemo(() => {
     return paymentConfigs.filter((item) => {
@@ -188,13 +162,6 @@ export default function BankDetailsManagement() {
     return filteredData.slice(start, start + pageSize);
   }, [filteredData, currentPage, pageSize]);
 
-  const handleCopyText = (id, text) => {
-    if (!text) return;
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-    showToast('Copied to clipboard.');
-  };
 
   // ----------------------------------------------------
   // ADD / EDIT MODAL HANDLERS
@@ -202,17 +169,15 @@ export default function BankDetailsManagement() {
   const openAddModal = () => {
     setModalMode('add');
     setEditingItem(null);
-    const defaultBank = AVAILABLE_BANK_ACCOUNTS[0] || '';
-    const lookup = BANK_DETAILS_LOOKUP[defaultBank] || {};
     setFormData({
-      paymentMode: AVAILABLE_PAYMENT_MODES[0] || '__CUSTOM__',
+      paymentMode: '',
       customPaymentMode: '',
       paymentType: 'Online',
-      bankAccount: defaultBank,
+      bankAccount: '',
       customBankAccount: '',
-      branch: lookup.branch || '',
-      ifscCode: lookup.ifscCode || '',
-      accountNumber: lookup.accountNumber || '',
+      branch: '',
+      ifscCode: '',
+      accountNumber: '',
       status: 'Active'
     });
     setFormErrors({});
@@ -222,85 +187,43 @@ export default function BankDetailsManagement() {
   const openEditModal = (config) => {
     setModalMode('edit');
     setEditingItem(config);
-    const isCustomMode = !AVAILABLE_PAYMENT_MODES.includes(config.paymentMode);
-    const isCustomBank = config.bankAccount && !AVAILABLE_BANK_ACCOUNTS.includes(config.bankAccount);
-    const lookup = BANK_DETAILS_LOOKUP[config.bankAccount] || {};
-
     setFormData({
-      paymentMode: isCustomMode ? '__CUSTOM__' : config.paymentMode,
-      customPaymentMode: isCustomMode ? config.paymentMode : '',
+      paymentMode: config.paymentMode || '',
+      customPaymentMode: '',
       paymentType: config.paymentType || (config.paymentMode === 'Cash' ? 'Offline' : 'Online'),
-      bankAccount: isCustomBank ? '__CUSTOM__' : (config.bankAccount || (config.paymentMode === 'Cash' ? '' : (AVAILABLE_BANK_ACCOUNTS[0] || ''))),
-      customBankAccount: isCustomBank ? config.bankAccount : '',
-      branch: config.branch || lookup.branch || '',
-      ifscCode: config.ifscCode || lookup.ifscCode || '',
-      accountNumber: config.accountNumber || lookup.accountNumber || '',
+      bankAccount: config.bankAccount || '',
+      customBankAccount: '',
+      branch: config.branch || '',
+      ifscCode: config.ifscCode || '',
+      accountNumber: config.accountNumber || '',
       status: config.status || 'Active'
     });
     setFormErrors({});
     setIsAddEditOpen(true);
   };
 
+  const isOfflineMode = (mode) => ['cash', 'cheque', 'dd'].includes((mode || '').trim().toLowerCase());
+
   const handlePaymentModeChange = (e) => {
     const val = e.target.value;
-    let autoType = 'Online';
-    let autoBank = formData.bankAccount;
-
-    if (val === 'Cash' || val === 'Cheque' || val === 'DD') {
-      autoType = 'Offline';
-      autoBank = '';
-    } else {
-      autoType = 'Online';
-      if (!autoBank) {
-        autoBank = AVAILABLE_BANK_ACCOUNTS[0] || '';
-      }
-    }
-
-    const lookup = BANK_DETAILS_LOOKUP[autoBank] || {};
-
     setFormData((prev) => ({
       ...prev,
       paymentMode: val,
-      paymentType: autoType,
-      bankAccount: autoBank,
-      branch: autoType === 'Offline' ? '' : (prev.branch || lookup.branch || ''),
-      ifscCode: autoType === 'Offline' ? '' : (prev.ifscCode || lookup.ifscCode || ''),
-      accountNumber: autoType === 'Offline' ? '' : (prev.accountNumber || lookup.accountNumber || '')
+      paymentType: isOfflineMode(val) ? 'Offline' : 'Online',
+      bankAccount: isOfflineMode(val) ? '' : prev.bankAccount
     }));
-
     if (formErrors.paymentMode) {
       setFormErrors((prev) => ({ ...prev, paymentMode: '' }));
     }
   };
 
   const handleBankAccountChange = (e) => {
-    const val = e.target.value;
-    const lookup = BANK_DETAILS_LOOKUP[val] || {};
-
-    setFormData((prev) => ({
-      ...prev,
-      bankAccount: val,
-      branch: lookup.branch || prev.branch || '',
-      ifscCode: lookup.ifscCode || prev.ifscCode || '',
-      accountNumber: lookup.accountNumber || prev.accountNumber || ''
-    }));
-
+    setFormData((prev) => ({ ...prev, bankAccount: e.target.value }));
     if (formErrors.bankAccount) {
       setFormErrors((prev) => ({ ...prev, bankAccount: '' }));
     }
   };
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    let finalValue = value;
-    if (name === 'ifscCode') {
-      finalValue = value.toUpperCase();
-    }
-    setFormData((prev) => ({ ...prev, [name]: finalValue }));
-    if (formErrors[name]) {
-      setFormErrors((prev) => ({ ...prev, [name]: '' }));
-    }
-  };
 
   // Preview what the display label will be
   const previewLabel = useMemo(() => {
@@ -343,15 +266,6 @@ export default function BankDetailsManagement() {
     if (!isOffline) {
       if (!effectiveBank) {
         errors.bankAccount = 'Bank Account is mandatory for Online payment mode.';
-      }
-      if (!formData.branch?.trim()) {
-        errors.branch = 'Branch name is mandatory.';
-      }
-      if (!formData.ifscCode?.trim()) {
-        errors.ifscCode = 'IFSC Code is mandatory.';
-      }
-      if (!formData.accountNumber?.trim()) {
-        errors.accountNumber = 'Account Number is mandatory.';
       }
     }
 
@@ -397,21 +311,11 @@ export default function BankDetailsManagement() {
       if (!isOffline && effectiveBank) {
         const banksRes = await api.get('/masters/banks?limit=1000');
         const banks = banksRes.data?.data || [];
-        // Same bank + same account (blank counts as blank) is one bank, so saving never makes a duplicate
         const norm = (v) => String(v || '').trim().toLowerCase();
-        let bank = banks.find(
-          (b) => norm(b.name_en) === norm(effectiveBank) && norm(b.account_number) === norm(formData.accountNumber)
-        );
-        
+        let bank = banks.find((b) => norm(b.name_en) === norm(effectiveBank));
+
         if (!bank) {
-          const bankCode = effectiveBank.substring(0,3).toUpperCase() + Date.now().toString().slice(-4);
-          const newBankRes = await api.post('/masters/banks', {
-            code: bankCode,
-            name_en: effectiveBank,
-            account_number: formData.accountNumber.trim(),
-            branch_name: formData.branch.trim(),
-            ifsc_code: formData.ifscCode.trim().toUpperCase()
-          });
+          const newBankRes = await api.post('/masters/banks', { name_en: effectiveBank });
           finalBankId = newBankRes.data.id;
         } else {
           finalBankId = bank.id;
@@ -442,21 +346,9 @@ export default function BankDetailsManagement() {
 
   const isPendingApproval = (data) => Boolean(data && (data.approval_request_id || data.status === 'PENDING'));
 
-  // How many receipts were recorded with this payment mode / bank account
-  const getModeUsageCount = (cfg) => {
-    const bank = (cfg.bankAccount || '').trim().toLowerCase();
-    const mode = (cfg.paymentMode || '').trim().toLowerCase();
-    const label = formatPaymentModeLabel(cfg).trim().toLowerCase();
-    return receipts.filter((r) => {
-      const rBank = (r.bankName || r.bankAccount || '').trim().toLowerCase();
-      const rMode = (r.paymentMode || '').trim().toLowerCase();
-      return bank ? rBank === bank : rMode === mode || rMode === label;
-    }).length;
-  };
 
   const handleDeleteClick = (cfg) => {
-    if (getModeUsageCount(cfg) > 0) setBlockedDialog(cfg);
-    else setDeleteDialog(cfg);
+    setDeleteDialog(cfg); // the server warns (and offers "delete anyway") if receipts use it
   };
 
   const handleToggleStatusClick = (config) => {
@@ -501,6 +393,30 @@ export default function BankDetailsManagement() {
     setStatusDialog(null);
   };
 
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => ({
+      title: `${d.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} payment mode?`,
+      text: `Are you sure you want to mark ${formatPaymentModeLabel(d.item)} as ${d.newStatus}?`,
+      confirmText: d.newStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+      danger: d.newStatus === 'Inactive',
+    }),
+    confirmStatusToggle
+  );
+
+  useSwalConfirm(
+    deleteDialog,
+    () => setDeleteDialog(null),
+    (d) => ({
+      title: 'Delete payment mode?',
+      text: `"${formatPaymentModeLabel(d)}" will be removed from the Payment Mode dropdown. Receipts already recorded with it are not changed.`,
+      confirmText: 'Yes, delete',
+      danger: true,
+    }),
+    confirmDelete
+  );
+
   return (
     <PermissionGate required="masters.payment_modes.read">
     <div className="space-y-6">
@@ -529,29 +445,24 @@ export default function BankDetailsManagement() {
         </div>
       )}
 
-      {/* Breadcrumbs & Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-[#E8DFD8] pb-5">
-        <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-              Payment Mode Configuration
-            </h1>
-        </div>
-
-        {/* Action Button: Add Payment Mode */}
-        <button
-          onClick={openAddModal}
-          id="btn-add-payment-mode"
-          disabled={!hasPermission('masters.payment_modes.write')}
-          title={!hasPermission('masters.payment_modes.write') ? 'Requires masters.payment_modes.write permission' : undefined}
-          className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-[#510601] hover:bg-[#3D0400] active:bg-[#200200] text-white text-sm font-bold rounded-xl shadow-sm hover:shadow transition-all duration-200 cursor-pointer shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Payment Mode</span>
-        </button>
+      {/* Action row: the filter icon, and Add Payment Mode when this login may write */}
+      <div className="flex items-center justify-end gap-2 -mb-2">
+        <FilterToggle open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)} count={statusFilter !== 'ALL' ? 1 : 0} />
+        {hasPermission('masters.payment_modes.write') && (
+          <button
+            onClick={openAddModal}
+            id="btn-add-payment-mode"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#3D0400] active:bg-[#200200] text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm hover:shadow transition-all duration-200 cursor-pointer shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Payment Mode</span>
+          </button>
+        )}
       </div>
 
       {/* Search & Filter Card */}
-      <div className="bg-white border border-[#E8DFD8] rounded-2xl shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+      {filtersOpen && (
+<div className="bg-white border border-[#E8DFD8] rounded-2xl shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 flex-1">
             {/* Search Input */}
             <div className="relative flex-1 max-w-md">
@@ -575,7 +486,7 @@ export default function BankDetailsManagement() {
               )}
             </div>
 
-            {/* Status Filter */}
+                        {/* Status Filter */}
             <div className="flex items-center gap-2 shrink-0">
               <label className="text-xs font-bold text-[#863221] whitespace-nowrap">
                 Status:
@@ -604,12 +515,13 @@ export default function BankDetailsManagement() {
                 <span>Reset</span>
               </button>
             )}
-          </div>
+                        </div>
 
           <div className="text-xs font-semibold text-[#863221] self-end sm:self-auto">
             Showing <span className="text-[#180200]">{filteredData.length}</span> payment modes
           </div>
       </div>
+      )}
 
       {/* Main Table Card Container */}
       <div className="bg-white border border-[#E8DFD8] rounded-2xl shadow-sm overflow-hidden">
@@ -640,9 +552,6 @@ export default function BankDetailsManagement() {
                         <span className="font-black text-[#180200] text-sm font-serif">
                           {config.paymentMode}
                         </span>
-                        <div className="text-[10px] text-[#863221]/80 mt-0.5">
-                          Used in {getModeUsageCount(config)} receipt{getModeUsageCount(config) === 1 ? '' : 's'}
-                        </div>
                       </td>
 
                       {/* Column: Display in Receipts */}
@@ -678,7 +587,7 @@ export default function BankDetailsManagement() {
                           <button
                             type="button"
                             onClick={() => setViewingItem(config)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 border border-slate-200 rounded-lg hover:bg-slate-200 transition-colors cursor-pointer"
+                            className="btn-act"
                             title="View Configuration Details"
                           >
                             <Eye className="w-3.5 h-3.5" />
@@ -686,28 +595,30 @@ export default function BankDetailsManagement() {
                           </button>
 
                           {/* Edit Button */}
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(config)}
-                            disabled={!hasPermission('masters.payment_modes.write')}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={!hasPermission('masters.payment_modes.write') ? 'Requires masters.payment_modes.write permission' : 'Edit Payment Mode'}
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
+                          {hasPermission('masters.payment_modes.write') && (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(config)}
+                              className="btn-act"
+                              title={'Edit Payment Mode'}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+                          )}
 
                           {/* Delete Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteClick(config)}
-                            disabled={!hasPermission('masters.payment_modes.delete')}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={!hasPermission('masters.payment_modes.delete') ? 'Requires masters.payment_modes.delete permission' : 'Delete Payment Mode'}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>Delete</span>
-                          </button>
+                          {hasPermission('masters.payment_modes.delete') && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteClick(config)}
+                              className="btn-act btn-act-danger"
+                              title={'Delete Payment Mode'}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete</span>
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -736,14 +647,15 @@ export default function BankDetailsManagement() {
                           Clear Filters
                         </button>
                       ) : (
-                        <button
-                          onClick={openAddModal}
-                          disabled={!hasPermission('masters.payment_modes.write')}
-                          title={!hasPermission('masters.payment_modes.write') ? 'Requires masters.payment_modes.write permission' : undefined}
-                          className="px-4 py-2 bg-[#510601] text-white text-xs font-bold rounded-xl hover:bg-[#3D0400] transition-colors"
-                        >
-                          + Add First Payment Mode
-                        </button>
+                        hasPermission('masters.payment_modes.write') && (
+                          <button
+                            onClick={openAddModal}
+
+                            className="px-4 py-2 bg-[#510601] text-white text-xs font-bold rounded-xl hover:bg-[#3D0400] transition-colors"
+                          >
+                            + Add First Payment Mode
+                          </button>
+                        )
                       )}
                     </div>
                   </td>
@@ -755,7 +667,7 @@ export default function BankDetailsManagement() {
 
         {/* Pagination Footer */}
         {filteredData.length > 0 && (
-          <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/30 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#863221]">
+          <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#863221]">
             <div className="flex items-center gap-2">
               <span>Show</span>
               <select
@@ -813,7 +725,7 @@ export default function BankDetailsManagement() {
       >
         <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-lg overflow-hidden animate-in zoom-in-95 duration-200 max-h-[90vh] flex flex-col">
           {/* Modal Header */}
-          <div className="px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-between shrink-0">
+          <div className="px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-between shrink-0">
             <div>
               <h3 className="text-lg font-bold text-[#180200] font-serif">
                 {modalMode === 'add' ? 'Add Payment Mode' : 'Edit Payment Mode'}
@@ -830,37 +742,24 @@ export default function BankDetailsManagement() {
           {/* Modal Form */}
           <form onSubmit={handleSaveForm} className="flex flex-col flex-1 overflow-hidden">
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
-            {/* Field: Payment Mode * */}
+            {/* Field: Payment Mode */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
                 Payment Mode <span className="text-[#ED4636]">*</span>
               </label>
-              <select
+              <input
+                type="text"
                 name="paymentMode"
+                list="payment-mode-options"
                 value={formData.paymentMode}
                 onChange={handlePaymentModeChange}
-                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-semibold text-[#180200] focus:outline-none cursor-pointer"
-              >
+                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm text-[#180200] focus:outline-none"
+              />
+              <datalist id="payment-mode-options">
                 {AVAILABLE_PAYMENT_MODES.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
+                  <option key={opt} value={opt} />
                 ))}
-                <option value="__CUSTOM__">+ Other / Custom Payment Mode</option>
-              </select>
-
-              {formData.paymentMode === '__CUSTOM__' && (
-                <div className="mt-2">
-                  <input
-                    type="text"
-                    name="customPaymentMode"
-                    value={formData.customPaymentMode}
-                    onChange={handleInputChange}
-                    className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm text-[#180200] placeholder-[#863221]/40 focus:outline-none uppercase"
-                  />
-                </div>
-              )}
-
+              </datalist>
               {formErrors.paymentMode && (
                 <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -869,171 +768,36 @@ export default function BankDetailsManagement() {
               )}
             </div>
 
-            {/* Field: Bank Account (Conditional) */}
+            {/* Field: Bank Account (not for Cash / Cheque / DD) */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                Bank Account{' '}
-                {formData.paymentMode !== 'Cash' && formData.paymentMode !== 'Cheque' && formData.paymentMode !== 'DD' ? (
-                  <span className="text-[#ED4636]">*</span>
-                ) : (
-                  <span className="text-gray-400 font-normal lowercase">(not applicable)</span>
-                )}
+                Bank Account {!isOfflineMode(formData.paymentMode) && <span className="text-[#ED4636]">*</span>}
               </label>
-
-              {formData.paymentMode === 'Cash' || formData.paymentMode === 'Cheque' || formData.paymentMode === 'DD' ? (
-                <div className="px-3.5 py-2.5 bg-[#FAF7F2] border border-[#E8DFD8] rounded-xl text-sm text-[#863221] italic flex items-center justify-between">
-                  <span>Not Applicable for {formData.paymentMode}</span>
-                  <span className="text-xs font-semibold px-2 py-0.5 bg-white border border-[#E8DFD8] rounded text-[#510601]">
-                    NA
-                  </span>
-                </div>
-              ) : (
-                <>
-                  <select
-                    name="bankAccount"
-                    value={formData.bankAccount}
-                    onChange={handleBankAccountChange}
-                    className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-semibold text-[#180200] focus:outline-none cursor-pointer"
-                  >
-                    {AVAILABLE_BANK_ACCOUNTS.map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
-                    ))}
-                    <option value="__CUSTOM__">+ Other / Custom Bank Account</option>
-                  </select>
-
-                  {formData.bankAccount === '__CUSTOM__' && (
-                    <div className="mt-2">
-                      <input
-                        type="text"
-                        name="customBankAccount"
-                        value={formData.customBankAccount}
-                        onChange={handleInputChange}
-                        className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm text-[#180200] placeholder-[#863221]/40 focus:outline-none uppercase"
-                      />
-                    </div>
-                  )}
-
-                  {formErrors.bankAccount && (
-                    <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{formErrors.bankAccount}</span>
-                    </p>
-                  )}
-                </>
+              <input
+                type="text"
+                name="bankAccount"
+                list="bank-account-options"
+                value={formData.bankAccount}
+                onChange={handleBankAccountChange}
+                disabled={isOfflineMode(formData.paymentMode)}
+                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm text-[#180200] focus:outline-none disabled:bg-[#FAF7F2] disabled:cursor-not-allowed"
+              />
+              <datalist id="bank-account-options">
+                {AVAILABLE_BANK_ACCOUNTS.map((opt) => (
+                  <option key={opt} value={opt} />
+                ))}
+              </datalist>
+              {formErrors.bankAccount && (
+                <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{formErrors.bankAccount}</span>
+                </p>
               )}
-            </div>
-
-            {/* Online Bank Details: Branch, IFSC Code, Account Number */}
-            {formData.paymentMode !== 'Cash' && formData.paymentMode !== 'Cheque' && formData.paymentMode !== 'DD' && (
-              <div className="space-y-4 pt-1 border-t border-[#E8DFD8]/60">
-                {/* Branch */}
-                <div>
-                  <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                    Branch <span className="text-[#ED4636]">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    name="branch"
-                    value={formData.branch || ''}
-                    onChange={handleInputChange}
-                    className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm text-[#180200] placeholder-[#863221]/40 focus:outline-none"
-                  />
-                  {formErrors.branch && (
-                    <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{formErrors.branch}</span>
-                    </p>
-                  )}
-                </div>
-
-                {/* IFSC Code */}
-                <div>
-                  <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                    IFSC Code <span className="text-[#ED4636]">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    name="ifscCode"
-                    value={formData.ifscCode || ''}
-                    onChange={handleInputChange}
-                    maxLength={11}
-                    className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-mono uppercase text-[#180200] placeholder-[#863221]/40 focus:outline-none"
-                  />
-                  {formErrors.ifscCode && (
-                    <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{formErrors.ifscCode}</span>
-                    </p>
-                  )}
-                </div>
-
-                {/* Account Number */}
-                <div>
-                  <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                    Account Number <span className="text-[#ED4636]">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    name="accountNumber"
-                    value={formData.accountNumber || ''}
-                    onChange={handleInputChange}
-                    className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-mono text-[#180200] placeholder-[#863221]/40 focus:outline-none"
-                  />
-                  {formErrors.accountNumber && (
-                    <p className="mt-1 text-xs text-red-600 flex items-center gap-1 font-medium">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{formErrors.accountNumber}</span>
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Live Preview Box (Styled exactly like the clean input/select field above it) */}
-            <div>
-              <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                Receipt Form Display Preview
-              </label>
-              <div className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] rounded-xl text-sm font-semibold text-[#180200] shadow-2xs">
-                {previewLabel}
-              </div>
-            </div>
-
-            {/* Field: Status */}
-            <div>
-              <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                Status
-              </label>
-              <select
-                name="status"
-                value={formData.status}
-                onChange={handleInputChange}
-                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-semibold text-[#180200] focus:outline-none cursor-pointer"
-              >
-                <option value="Active">Active (Available in Receipt dropdown)</option>
-                <option value="Inactive">Inactive (Disabled for new receipts)</option>
-              </select>
             </div>
 
             {/* Modal Buttons */}
             </div>
-            <div className="px-6 py-4 border-t border-[#E8DFD8] flex items-center justify-end gap-2.5 shrink-0 bg-[#FAF7F2]  rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsAddEditOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] hover:bg-[#FAF7F2] text-sm font-semibold text-[#863221] rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#3D0400] text-white text-sm font-bold rounded-xl shadow-sm hover:shadow transition-all duration-200 cursor-pointer"
-              >
-                {modalMode === 'add' ? 'Save Payment Mode' : 'Save Changes'}
-              </button>
-            </div>
+            <ModalFooter kind={modalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsAddEditOpen(false)} />
           </form>
         </div>
       </Modal>
@@ -1046,260 +810,39 @@ export default function BankDetailsManagement() {
         onClose={() => setViewingItem(null)}
         className="p-4"
       >
-        {viewingItem && (
-          <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
-            {/* Header */}
-            <div className="px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-bold text-[#180200] font-serif">
-                  Payment Mode Details
-                </h3>
-              </div>
-              <button
-                onClick={() => setViewingItem(null)}
-                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Content Details */}
-            <div className="p-6 space-y-4">
-              <div className="bg-[#FAF7F2] border border-[#E8DFD8] rounded-xl p-4 flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] font-bold text-[#863221] uppercase tracking-wider block">
-                    Payment Mode
-                  </span>
-                  <span className="text-lg font-black text-[#180200]">
-                    {viewingItem.paymentMode}
-                  </span>
-                </div>
-                <span
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${(viewingItem.status || 'Active') === 'Active'
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    : 'bg-gray-100 text-gray-600 border-gray-200'
-                    }`}
+        {viewingItem && (() => {
+          const isBank = !['Cash', 'Cheque', 'DD'].includes(viewingItem.paymentMode);
+          const rows = [
+            ['Payment mode', viewingItem.paymentMode],
+            ['Status', viewingItem.status || 'Active'],
+            ...(isBank ? [['Bank account', viewingItem.bankAccount || '-']] : []),
+            ['Shown on receipt as', formatPaymentModeLabel(viewingItem)],
+          ];
+          return (
+            <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col">
+              <div className="px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-between">
+                <h3 className="text-lg font-bold text-[#180200] font-serif">Payment Mode Details</h3>
+                <button
+                  type="button"
+                  onClick={() => setViewingItem(null)}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
+                  aria-label="Close"
                 >
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full ${(viewingItem.status || 'Active') === 'Active'
-                      ? 'bg-emerald-500'
-                      : 'bg-gray-400'
-                      }`}
-                  />
-                  <span>{viewingItem.status || 'Active'}</span>
-                </span>
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-
-              {viewingItem.paymentMode !== 'Cash' && viewingItem.paymentMode !== 'Cheque' && viewingItem.paymentMode !== 'DD' && (
-                <>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="p-3 bg-white border border-[#E8DFD8] rounded-xl">
-                      <span className="text-[10px] font-bold text-[#863221] uppercase tracking-wider block mb-0.5">
-                        Bank Identifier
-                      </span>
-                      <span className="text-sm font-mono font-bold text-[#180200] block mt-0.5">
-                        {viewingItem.bankAccount || '-'}
-                      </span>
-                    </div>
-
-                    <div className="p-3 bg-white border border-[#E8DFD8] rounded-xl">
-                      <span className="text-[10px] font-bold text-[#863221] uppercase tracking-wider block mb-0.5">
-                        Branch
-                      </span>
-                      <span className="text-sm font-semibold text-[#180200] block mt-0.5">
-                        {viewingItem.branch || (BANK_DETAILS_LOOKUP[viewingItem.bankAccount]?.branch) || '-'}
-                      </span>
-                    </div>
+              <dl className="divide-y divide-[#F0E8E2] text-sm px-6 py-2">
+                {rows.map(([label, value]) => (
+                  <div key={label} className="flex items-baseline justify-between gap-4 py-2.5">
+                    <dt className="text-xs text-[#863221] shrink-0">{label}</dt>
+                    <dd className="font-semibold text-[#180200] text-right break-all">{value}</dd>
                   </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="p-3 bg-white border border-[#E8DFD8] rounded-xl">
-                      <span className="text-[10px] font-bold text-[#863221] uppercase tracking-wider block mb-0.5">
-                        IFSC Code
-                      </span>
-                      <span className="text-sm font-mono font-bold text-[#180200] block mt-0.5">
-                        {viewingItem.ifscCode || (BANK_DETAILS_LOOKUP[viewingItem.bankAccount]?.ifscCode) || '-'}
-                      </span>
-                    </div>
-
-                    <div className="p-3 bg-white border border-[#E8DFD8] rounded-xl">
-                      <span className="text-[10px] font-bold text-[#863221] uppercase tracking-wider block mb-0.5">
-                        Account Number
-                      </span>
-                      <div className="flex items-center justify-between mt-0.5">
-                        <span className="text-xs font-mono font-bold text-[#180200] truncate">
-                          {viewingItem.accountNumber || (BANK_DETAILS_LOOKUP[viewingItem.bankAccount]?.accountNumber) || '-'}
-                        </span>
-                        {(viewingItem.accountNumber || BANK_DETAILS_LOOKUP[viewingItem.bankAccount]?.accountNumber) && (
-                          <button
-                            type="button"
-                            onClick={() => handleCopyText(viewingItem.id, viewingItem.accountNumber || BANK_DETAILS_LOOKUP[viewingItem.bankAccount]?.accountNumber)}
-                            className="p-1 text-[#863221] hover:text-[#510601] hover:bg-[#FAF7F2] rounded transition-colors shrink-0 ml-1"
-                            title="Copy Account Number"
-                          >
-                            {copiedId === viewingItem.id ? (
-                              <Check className="w-3.5 h-3.5 text-green-600" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-
-              <div className="p-3 bg-white border border-[#E8DFD8] rounded-xl">
-                <span className="text-[10px] font-bold text-[#863221] uppercase tracking-wider block mb-0.5">
-                  Receipt Form Option Label
-                </span>
-                <span className="text-base font-bold text-[#510601] block">
-                  {formatPaymentModeLabel(viewingItem)}
-                </span>
-              </div>
+                ))}
+              </dl>
+              <ModalFooter kind="view" onCancel={() => setViewingItem(null)} />
             </div>
-
-            {/* Read-only footer */}
-            <div className="px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-end gap-2.5">
-              <button
-                onClick={() => setViewingItem(null)}
-                className="px-4 py-2 border border-[#E8DFD8] text-xs font-semibold text-[#863221] hover:bg-white rounded-xl transition-colors cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* ====================================================================== */}
-      {/* MODAL 3: STATUS TOGGLE CONFIRMATION */}
-      {/* ====================================================================== */}
-      <Modal
-        isOpen={!!statusDialog}
-        onClose={() => setStatusDialog(null)}
-        className="p-4"
-      >
-        {statusDialog && (
-          <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-5 text-center">
-              <div
-                className={`w-12 h-12 rounded-full mx-auto flex items-center justify-center mb-3 ${statusDialog.newStatus === 'Active'
-                  ? 'bg-emerald-50 text-emerald-600'
-                  : 'bg-amber-50 text-amber-600'
-                  }`}
-              >
-                {statusDialog.newStatus === 'Active' ? (
-                  <CheckCircle2 className="w-6 h-6" />
-                ) : (
-                  <AlertTriangle className="w-6 h-6" />
-                )}
-              </div>
-              <h4 className="text-base font-bold text-[#180200] font-serif mb-1">
-                Change Status to {statusDialog.newStatus}?
-              </h4>
-              <p className="text-xs text-[#863221] leading-relaxed">
-                {statusDialog.newStatus === 'Inactive'
-                  ? `Setting "${formatPaymentModeLabel(statusDialog.item)}" to Inactive will hide it from the Payment Mode dropdown for new receipts. All existing historical receipts with this mode remain intact.`
-                  : `Setting "${formatPaymentModeLabel(statusDialog.item)}" to Active will make it immediately available for selection in new receipts.`}
-              </p>
-            </div>
-            <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setStatusDialog(null)}
-                className="px-4 py-2 border border-[#E8DFD8] text-xs font-semibold text-[#863221] hover:bg-white rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.payment_modes.write')}
-                title={!hasPermission('masters.payment_modes.write') ? 'Requires masters.payment_modes.write permission' : undefined}
-                onClick={confirmStatusToggle}
-                className={`px-5 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors cursor-pointer ${statusDialog.newStatus === 'Active'
-                  ? 'bg-emerald-700 hover:bg-emerald-800'
-                  : 'bg-[#510601] hover:bg-[#3D0400]'
-                  }`}
-              >
-                Confirm {statusDialog.newStatus}
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* Cannot delete: receipts still use this mode */}
-      <Modal isOpen={!!blockedDialog} onClose={() => setBlockedDialog(null)} className="p-4">
-        {blockedDialog && (
-          <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-5 text-center">
-              <div className="w-12 h-12 rounded-full mx-auto flex items-center justify-center mb-3 bg-amber-50 text-amber-600">
-                <AlertTriangle className="w-6 h-6" />
-              </div>
-              <h4 className="text-base font-bold text-[#180200] font-serif mb-1">Cannot Delete Payment Mode</h4>
-              <p className="text-xs text-[#863221] leading-relaxed">
-                {`"${formatPaymentModeLabel(blockedDialog)}" is used by ${getModeUsageCount(blockedDialog)} receipt(s). Deactivate it instead: it disappears from Receipt Entry and the recorded receipts stay unchanged.`}
-              </p>
-            </div>
-            <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setBlockedDialog(null)}
-                className="px-4 py-2 border border-[#E8DFD8] text-xs font-semibold text-[#863221] hover:bg-white rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.payment_modes.write') || (blockedDialog.status || 'Active') !== 'Active'}
-                onClick={() => {
-                  const cfg = blockedDialog;
-                  setBlockedDialog(null);
-                  setStatusDialog({ item: cfg, newStatus: 'Inactive' });
-                }}
-                className="px-5 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors cursor-pointer bg-[#510601] hover:bg-[#3D0400] disabled:opacity-40"
-              >
-                Deactivate Instead
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* Delete confirmation */}
-      <Modal isOpen={!!deleteDialog} onClose={() => setDeleteDialog(null)} className="p-4">
-        {deleteDialog && (
-          <div className="bg-white rounded-2xl shadow-xl border border-[#E8DFD8] w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-5 text-center">
-              <div className="w-12 h-12 rounded-full mx-auto flex items-center justify-center mb-3 bg-red-50 text-[#ED4636]">
-                <Trash2 className="w-6 h-6" />
-              </div>
-              <h4 className="text-base font-bold text-[#180200] font-serif mb-1">Delete Payment Mode?</h4>
-              <p className="text-xs text-[#863221] leading-relaxed">
-                {`"${formatPaymentModeLabel(deleteDialog)}" will be removed from the Payment Mode dropdown. Receipts already recorded with it are not changed.`}
-              </p>
-            </div>
-            <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex items-center justify-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setDeleteDialog(null)}
-                className="px-4 py-2 border border-[#E8DFD8] text-xs font-semibold text-[#863221] hover:bg-white rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.payment_modes.delete')}
-                onClick={confirmDelete}
-                className="px-5 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors cursor-pointer bg-[#ED4636] hover:bg-[#C93324] disabled:opacity-40"
-              >
-                Confirm Delete
-              </button>
-            </div>
-          </div>
-        )}
+          );
+        })()}
       </Modal>
     </div>
     </PermissionGate>

@@ -1,21 +1,52 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Users, UserCheck, Clock, Activity, UserX, Tag,
-  UserPlus, List, CheckCircle, FileText, ArrowRight, Eye, BookOpen, Printer,
-  X, MapPin, Phone, Mail, Calendar, Award, ShieldCheck, CheckCircle2, AlertCircle
+  Users,
+  UserCheck,
+  Clock,
+  Activity,
+  UserX,
+  Tag,
+  UserPlus,
+  List,
+  FileText,
+  ArrowRight,
+  Eye,
+  BookOpen,
+  Printer,
+  X,
+  MapPin,
+  Phone,
+  Mail,
+  Calendar,
+  Award,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
 } from 'recharts';
 import Modal from '../components/Modal';
 import clsx from 'clsx';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../api';
 import { getTodayDisplayDate } from '../utils/dateUtils';
 import Swal from 'sweetalert2';
 import { normalizeMember, unwrapList } from '../utils/apiAdapters';
+import useAuth from '../hooks/useAuth';
+import { resolveLandingPath } from '../utils/landing';
+import { formatMoney } from '../utils/money';
 
+import ModalFooter from '../components/ModalFooter';
 const iconMap = {
   'users': Users,
   'user-check': UserCheck,
@@ -26,18 +57,14 @@ const iconMap = {
   'book-open': BookOpen,
 };
 
-const MEMBERSHIP_COLORS = {
-  'Poshaka': '#510601',
-  'Mahaposhaka': '#F4AA26',
-  'Mahapalaka': '#3D705C',
-  'Sahasadasyatva': '#863221',
-};
+// a type without a colour of its own (set on the Membership Types screen) gets one from this list
+const FALLBACK_COLORS = ['#510601', '#F4AA26', '#3D705C', '#863221', '#6B4E9B', '#2F6F9F'];
 
 const StatCard = ({ title, value, icon, color, trend }) => {
   const Icon = iconMap[icon] || BookOpen || Users;
 
   return (
-    <div className="bg-white rounded-2xl p-5 border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] hover:shadow-lg transition-all h-full flex flex-col justify-between">
+    <div className="bg-white rounded-2xl p-5 border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] h-full flex flex-col justify-between">
       <div className="flex justify-between items-start gap-3">
         <div className="flex-1 min-w-0">
           <p className="text-xs font-semibold text-[#863221] uppercase tracking-wider mb-1 truncate" title={title}>
@@ -57,6 +84,8 @@ const StatCard = ({ title, value, icon, color, trend }) => {
 };
 
 export default function Dashboard() {
+  const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const [viewingMember, setViewingMember] = useState(null);
   
   const [stats, setStats] = useState({
@@ -65,19 +94,32 @@ export default function Dashboard() {
     pending: null,
     magazineCount: null
   });
+  const [awaitingFinal, setAwaitingFinal] = useState(null); // applicants with a receipt assigned, waiting for the final approval (null when not allowed)
+  const [money, setMoney] = useState(null); // today / month / unassigned / renewals (null when not allowed)
   
   const [recentActivity, setRecentActivity] = useState([]);
   const [membershipTypeData, setMembershipTypeData] = useState([]);
-  const [registrationData, setRegistrationData] = useState([]);
-  const [districtData, setDistrictData] = useState([]);
+  const [registrationData] = useState([]);
+  const [districtData] = useState([]);
   
+  // the dashboard is privilege-gated now (dashboard.read); a role without it
+  // lands on its first accessible page instead of a screen full of errors.
+  useEffect(() => {
+    if (hasPermission('dashboard.read')) return undefined;
+    let alive = true;
+    resolveLandingPath().then((path) => {
+      if (alive && path && path !== '/dashboard') navigate(path, { replace: true });
+    });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [dashRes, reportRes, membersRes] = await Promise.allSettled([
-          api.get('/dashboard'),
-          api.get('/reports/summary'),
-          api.get('/members?limit=5&sort_by=created_at&sort_desc=true')
+        const [dashRes, membersRes] = await Promise.allSettled([
+          api.get('/dashboard/'),
+          api.get('/members/?limit=5&sort_by=created_at&sort_desc=true')
         ]);
         
         // each part loads on its own: a privilege the user lacks hides that part only
@@ -89,11 +131,14 @@ export default function Dashboard() {
           magazineCount: dData.magazines ? dData.magazines.active_subscriptions || 0 : null
         });
         
-        const rData = reportRes.status === 'fulfilled' ? reportRes.value.data : {};
-        if (rData.memberships?.by_type) {
-          setMembershipTypeData(rData.memberships.by_type.map(item => ({
+        setMoney(dData.receipts && dData.receipts.today_amount !== undefined ? dData.receipts : null);
+        setAwaitingFinal(typeof dData.awaiting_final_approval === 'number' ? dData.awaiting_final_approval : null);
+
+        if (dData.memberships_by_type) {
+          setMembershipTypeData(dData.memberships_by_type.map((item, i) => ({
             name: item.membership_type,
-            value: item.member_count
+            value: item.member_count,
+            color: item.color || FALLBACK_COLORS[i % FALLBACK_COLORS.length]
           })));
         }
         
@@ -123,6 +168,29 @@ export default function Dashboard() {
   ];
 
 
+  const inr = formatMoney;
+  const monthChange =
+    money && money.last_month_amount > 0
+      ? Math.round(((money.month_amount - money.last_month_amount) / money.last_month_amount) * 100)
+      : null;
+  const moneyCards = money
+    ? [
+        { id: 'today', title: "Today's Collection", value: inr(money.today_amount), icon: 'activity', color: '#510601', to: '/dashboard/receipts/tracking' },
+        {
+          id: 'month',
+          title: monthChange === null ? 'This Month' : `This Month (${monthChange >= 0 ? '+' : ''}${monthChange}% vs last)`,
+          value: inr(money.month_amount),
+          icon: 'tag',
+          color: '#3D705C',
+          to: '/dashboard/receipts/tracking'
+        },
+        { id: 'unassigned', title: 'Unassigned Receipts', value: money.unassigned_count.toLocaleString(), icon: 'clock', color: '#EE6A00', to: '/dashboard/receipts/tracking' }
+      ]
+    : [];
+  if (awaitingFinal !== null) {
+    moneyCards.push({ id: 'awaiting', title: 'Awaiting Final Approval', value: awaitingFinal.toLocaleString(), icon: 'user-check', color: '#863221', to: '/dashboard/membership/assigned' });
+  }
+
   const currentDate = `${new Date().toLocaleDateString('en-US', { weekday: 'long' })}, ${getTodayDisplayDate()}`;
 
   // Everything shown in the member popup is read from the server
@@ -130,19 +198,12 @@ export default function Dashboard() {
     try {
       const { data } = await api.get(`/members/${item.id}`);
       const m = normalizeMember(data);
-      const nameOf = (path, id) =>
-        id
-          ? api.get(`/masters/${path}/${id}`).then((r) => r.data?.name_en || '').catch(() => '')
-          : Promise.resolve('');
-      const [stateName, districtName, talukName, receipts] = await Promise.all([
-        nameOf('states', data.state_id),
-        nameOf('districts', data.district_id),
-        nameOf('taluks', data.taluk_id),
-        api
-          .get('/receipts/tracking', { params: { member_id: item.id, limit: 1 } })
-          .then((r) => unwrapList(r.data))
-          .catch(() => [])
-      ]);
+      // the member comes with its state / district / taluk names; only the latest receipt is a second call
+      const { state_name: stateName = '', district_name: districtName = '', taluk_name: talukName = '' } = data;
+      const receipts = await api
+        .get('/receipts/tracking', { params: { member_id: item.id, limit: 1 } })
+        .then((r) => unwrapList(r.data))
+        .catch(() => []);
       const latest = receipts[0];
       setViewingMember({
         ...item,
@@ -153,7 +214,7 @@ export default function Dashboard() {
         talukName,
         mobile: m.mobile,
         address: m.address,
-        amount: latest ? `₹${Number(latest.amount).toLocaleString('en-IN')}` : ''
+        amount: latest ? `${formatMoney(latest.amount)}` : ''
       });
     } catch (err) {
       console.error('Failed to fetch member details', err);
@@ -171,14 +232,9 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-            Welcome to HMS
-          </h1>
-        </div>
-        <div className="bg-white px-4 py-2 rounded-lg border border-[#E8DFD8] shadow-sm text-sm font-medium text-[#180200]">
+      {/* Top Date Badge */}
+      <div className="flex justify-end -mb-2">
+        <div className="bg-white px-3.5 py-1.5 rounded-xl border border-[#E8DFD8] shadow-2xs text-xs font-semibold text-[#863221]">
           {currentDate}
         </div>
       </div>
@@ -190,36 +246,54 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* Quick Actions */}
-      <div>
-        <h2 className="text-sm font-semibold text-[#180200] uppercase tracking-wider mb-4 mt-8">Quick Actions</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-          <Link to="/dashboard/receipts/entry" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#510601] hover:shadow-md transition-all group h-full">
-            <div className="h-10 w-10 rounded-full bg-[#510601]/10 flex items-center justify-center mb-3 group-hover:bg-[#510601] transition-colors">
-              <FileText className="h-5 w-5 text-[#510601] group-hover:text-white transition-colors" />
-            </div>
-            <span className="text-xs font-semibold text-[#180200] text-center">Add Receipt</span>
-          </Link>
-          <Link to="/dashboard/membership/register" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#3D705C] hover:shadow-md transition-all group h-full">
-            <div className="h-10 w-10 rounded-full bg-[#3D705C]/10 flex items-center justify-center mb-3 group-hover:bg-[#3D705C] transition-colors">
-              <UserPlus className="h-5 w-5 text-[#3D705C] group-hover:text-white transition-colors" />
-            </div>
-            <span className="text-xs font-semibold text-[#180200] text-center">Add Member</span>
-          </Link>
-          <Link to="/dashboard/receipts/labels" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#FFC107] hover:shadow-md transition-all group h-full">
-            <div className="h-10 w-10 rounded-full bg-[#FFC107]/15 flex items-center justify-center mb-3 group-hover:bg-[#FFC107] transition-colors">
-              <Printer className="h-5 w-5 text-[#863221] group-hover:text-[#180200] transition-colors" />
-            </div>
-            <span className="text-xs font-semibold text-[#180200] text-center">Print Labels</span>
-          </Link>
-          <Link to="/dashboard/membership/list" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#ED4636] hover:shadow-md transition-all group h-full">
-            <div className="h-10 w-10 rounded-full bg-[#ED4636]/10 flex items-center justify-center mb-3 group-hover:bg-[#ED4636] transition-colors">
-              <List className="h-5 w-5 text-[#ED4636] group-hover:text-white transition-colors" />
-            </div>
-            <span className="text-xs font-semibold text-[#180200] text-center">Member Directory</span>
-          </Link>
+      {moneyCards.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mt-6">
+          {moneyCards.map(({ to, ...card }) => (
+            <StatCard key={card.id} {...card} /> // information only: the cards do not open another page
+          ))}
         </div>
-      </div>
+      )}
+
+      {/* Quick Actions */}
+      {(hasPermission('receipts.entry.write') || hasPermission('members.register.write') || hasPermission('members.label_list.read') || hasPermission('members.list.read')) && (
+        <div>
+          <h2 className="text-sm font-semibold text-[#180200] uppercase tracking-wider mb-4 mt-8">Quick Actions</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            {hasPermission('receipts.entry.write') && (
+              <Link to="/dashboard/receipts/entry" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#510601] hover:shadow-md transition-all group h-full">
+                <div className="h-10 w-10 rounded-full bg-[#510601]/10 flex items-center justify-center mb-3 group-hover:bg-[#510601] transition-colors">
+                  <FileText className="h-5 w-5 text-[#510601] group-hover:text-white transition-colors" />
+                </div>
+                <span className="text-xs font-semibold text-[#180200] text-center">Add Receipt</span>
+              </Link>
+            )}
+            {hasPermission('members.register.write') && (
+              <Link to="/dashboard/membership/register" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#3D705C] hover:shadow-md transition-all group h-full">
+                <div className="h-10 w-10 rounded-full bg-[#3D705C]/10 flex items-center justify-center mb-3 group-hover:bg-[#3D705C] transition-colors">
+                  <UserPlus className="h-5 w-5 text-[#3D705C] group-hover:text-white transition-colors" />
+                </div>
+                <span className="text-xs font-semibold text-[#180200] text-center">Add Member</span>
+              </Link>
+            )}
+            {hasPermission('members.label_list.read') && (
+              <Link to="/dashboard/receipts/labels" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#FFC107] hover:shadow-md transition-all group h-full">
+                <div className="h-10 w-10 rounded-full bg-[#FFC107]/15 flex items-center justify-center mb-3 group-hover:bg-[#FFC107] transition-colors">
+                  <Printer className="h-5 w-5 text-[#863221] group-hover:text-[#180200] transition-colors" />
+                </div>
+                <span className="text-xs font-semibold text-[#180200] text-center">Print Labels</span>
+              </Link>
+            )}
+            {hasPermission('members.list.read') && (
+              <Link to="/dashboard/membership/list" className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-[#E8DFD8] shadow-sm hover:border-[#ED4636] hover:shadow-md transition-all group h-full">
+                <div className="h-10 w-10 rounded-full bg-[#ED4636]/10 flex items-center justify-center mb-3 group-hover:bg-[#ED4636] transition-colors">
+                  <List className="h-5 w-5 text-[#ED4636] group-hover:text-white transition-colors" />
+                </div>
+                <span className="text-xs font-semibold text-[#180200] text-center">Member Directory</span>
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Analytics Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
@@ -260,7 +334,7 @@ export default function Dashboard() {
                   {membershipTypeData.map((entry, index) => (
                     <Cell
                       key={`cell-${index}`}
-                      fill={MEMBERSHIP_COLORS[entry.name] || '#863221'}
+                      fill={entry.color || '#863221'}
                     />
                   ))}
                 </Pie>
@@ -347,7 +421,7 @@ export default function Dashboard() {
                       <button
                         type="button"
                         onClick={() => handleOpenMemberView(item)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-colors cursor-pointer"
+                        className="btn-act"
                         title={`View ${item.name}'s Profile`}
                       >
                         <Eye className="w-3.5 h-3.5" />
@@ -372,7 +446,7 @@ export default function Dashboard() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2]">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-xl bg-[#510601] text-white flex items-center justify-center font-bold text-base shadow-sm">
                   {(viewingMember.fullName || viewingMember.name || 'M').charAt(0).toUpperCase()}
@@ -384,7 +458,7 @@ export default function Dashboard() {
                     </h3>
                     {viewingMember.membershipNumber && (
                       <span className="font-mono font-bold text-xs bg-white text-[#510601] px-2 py-0.5 rounded-md border border-[#E8DFD8]">
-                        #{viewingMember.membershipNumber}
+                        {viewingMember.membershipNumber}
                       </span>
                     )}
                   </div>
@@ -507,23 +581,15 @@ export default function Dashboard() {
 
             {/* Modal Footer */}
             </div>
-            <div className="shrink-0 flex items-center justify-between px-6 py-3.5 border-t border-[#E8DFD8] bg-[#FAF7F2]">
-              <Link
-                to="/dashboard/membership/list"
-                onClick={() => setViewingMember(null)}
-                className="text-xs font-semibold text-[#510601] hover:text-[#8C1801] flex items-center gap-1"
-              >
-                <span>Go to Membership Directory</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-              <button
-                type="button"
-                onClick={() => setViewingMember(null)}
-                className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
+            <ModalFooter
+              kind="view"
+              onCancel={() => setViewingMember(null)}
+              left={
+                <Link to="/dashboard/membership/list" onClick={() => setViewingMember(null)} className="text-sm font-semibold text-[#510601] hover:text-[#8C1801] cursor-pointer">
+                  Go to Membership Directory
+                </Link>
+              }
+            />
           </div>
         )}
       </Modal>

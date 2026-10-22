@@ -1,6 +1,7 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, UserCheck, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, UserCheck } from 'lucide-react';
 import { formatDate } from '../utils/dateUtils';
+import { formatMoney } from '../utils/money';
 
 // Result of "who is this membership number?" under the Membership No. box of Receipt Entry.
 // lookup: { status: 'idle' | 'loading' | 'done' | 'error', matches: [...] } from GET /receipts/member-lookup
@@ -27,9 +28,9 @@ export default function MemberLookupCard({ lookup, onUse }) {
 
   if (!lookup.matches || lookup.matches.length === 0) {
     return (
-      <div className="mt-1.5 flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[11px] font-semibold text-red-700">
-        <XCircle className="w-3.5 h-3.5 shrink-0" />
-        <span>No member or applicant has this number.</span>
+      <div className="mt-1.5 flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] font-semibold text-amber-800">
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+        <span>No member has this number yet. You can still save; the receipt stays Unassigned until it is mapped.</span>
       </div>
     );
   }
@@ -65,14 +66,14 @@ export default function MemberLookupCard({ lookup, onUse }) {
 
             <div className="grid grid-cols-2 gap-x-3 gap-y-2">
               <Field label="Membership No." value={m.membership_number || m.member_code} />
-              <Field label="Registration No." value={m.registration_number} />
+              <Field label="Record ID" value={m.registration_number} />
               <Field label="Mobile" value={m.mobile} />
               <Field label="Valid till" value={m.valid_till ? formatDate(m.valid_till) : ''} />
               <div className="col-span-2 min-w-0">
                 <span className="block text-[10px] font-semibold uppercase tracking-wide text-[#863221]/70">Last receipt</span>
                 <span className="block text-[#180200] font-medium truncate">
                   {m.last_receipt
-                    ? `${m.last_receipt.receipt_number} · ${formatDate(m.last_receipt.receipt_date)} · ₹${Number(m.last_receipt.amount || 0).toLocaleString('en-IN')}`
+                    ? `${m.last_receipt.receipt_number} · ${formatDate(m.last_receipt.receipt_date)} · ${formatMoney(m.last_receipt.amount || 0)}`
                     : 'None yet'}
                 </span>
               </div>

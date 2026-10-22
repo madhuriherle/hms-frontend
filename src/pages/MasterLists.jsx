@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Pencil, Trash2, RefreshCw } from 'lucide-react';
+import { Plus, Pencil, Trash2 } from 'lucide-react';
 import api from '../api';
 import PermissionGate from '../components/PermissionGate';
 import SearchFilterBar from '../components/SearchFilterBar';
@@ -8,7 +8,6 @@ import useAuth from '../hooks/useAuth';
 import { askForm, confirmYesNo, showError, showSuccess } from '../utils/dialogs';
 
 const isPending = (d) => Boolean(d && (d.approval_request_id || d.status === 'PENDING'));
-const makeCode = (name) => `${String(name).replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase() || 'ITEM'}${Date.now().toString().slice(-5)}`;
 
 // One list screen for a simple master: search, add, edit, active/inactive, delete.
 // Everything is read from and written to the server.
@@ -75,7 +74,6 @@ function MasterTable({ title, subtitle, endpoint, fields, columns, withCode, pag
     if (!values) return;
     try {
       const body = toBody(values);
-      if (withCode) body.code = makeCode(values.name_en);
       const { data } = await api.post(endpoint, body);
       await done(data, 'Added.', 'Submitted for approval.');
     } catch (err) {
@@ -140,16 +138,17 @@ function MasterTable({ title, subtitle, endpoint, fields, columns, withCode, pag
         rightSlot={
           <>
             
-            <button
-              type="button"
-              onClick={add}
-              disabled={!hasPermission(`${permBase}.write`)}
-              title={!hasPermission(`${permBase}.write`) ? `Requires ${permBase}.write permission` : `Add ${title}`}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl cursor-pointer disabled:opacity-40 shrink-0"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add</span>
-            </button>
+            {hasPermission(`${permBase}.write`) && (
+              <button
+                type="button"
+                onClick={add}
+                title={`Add ${title}`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl cursor-pointer disabled:opacity-40 shrink-0"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add</span>
+              </button>
+            )}
           </>
         }
       >
@@ -208,26 +207,28 @@ function MasterTable({ title, subtitle, endpoint, fields, columns, withCode, pag
                   </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => edit(row)}
-                        disabled={!hasPermission(`${permBase}.write`)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                        title={!hasPermission(`${permBase}.write`) ? `Requires ${permBase}.write permission` : 'Edit'}
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                        <span>Edit</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => remove(row)}
-                        disabled={!hasPermission(`${permBase}.delete`)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                        title={!hasPermission(`${permBase}.delete`) ? `Requires ${permBase}.delete permission` : 'Delete'}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Delete</span>
-                      </button>
+                      {hasPermission(`${permBase}.write`) && (
+                        <button
+                          type="button"
+                          onClick={() => edit(row)}
+                          className="btn-act"
+                          title={'Edit'}
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>Edit</span>
+                        </button>
+                      )}
+                      {hasPermission(`${permBase}.delete`) && (
+                        <button
+                          type="button"
+                          onClick={() => remove(row)}
+                          className="btn-act btn-act-danger"
+                          title={'Delete'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Delete</span>
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -237,35 +238,6 @@ function MasterTable({ title, subtitle, endpoint, fields, columns, withCode, pag
         </table>
       </div>
     </div>
-  );
-}
-
-// ───────────── Bank master ─────────────
-export function BankMaster() {
-  return (
-    <PermissionGate required="masters.banks.read">
-      <div className="space-y-6">
-        <MasterTable
-          permBase="masters.banks"
-          pageTitle="Bank Master"
-          title="Bank"
-          endpoint="/masters/banks"
-          withCode
-          fields={[
-            { name: 'name_en', label: 'Bank name', required: true },
-            { name: 'branch_name', label: 'Branch' },
-            { name: 'ifsc_code', label: 'IFSC code' },
-            { name: 'account_number', label: 'Account number' }
-          ]}
-          columns={[
-            { label: 'Bank', render: (r) => r.name_en },
-            { label: 'Branch', render: (r) => r.branch_name },
-            { label: 'IFSC', render: (r) => r.ifsc_code },
-            { label: 'Account no.', render: (r) => r.account_number }
-          ]}
-        />
-      </div>
-    </PermissionGate>
   );
 }
 
@@ -311,9 +283,7 @@ export default function PersonalMasters() {
   return (
     <PermissionGate required="masters.read">
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">Personal Masters</h1>
-        </div>
+
         <div className="flex flex-wrap gap-2">
           {Object.entries(tabs).map(([key, t]) => (
             <button

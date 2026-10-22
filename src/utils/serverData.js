@@ -1,18 +1,47 @@
 // Server-backed data for the whole panel. Nothing here is stored in the
 // browser: every function reads the API and returns the shape the pages use.
 import api from '../api';
-import { fetchMembers, fetchReceipts, unwrapList } from './apiAdapters';
+import { fetchMemberPage, normalizeReceipt, unwrapList } from './apiAdapters';
 
 const rows = (res) => unwrapList(res?.data);
 const statusLabel = (flag) => (flag ? 'Active' : 'Inactive');
 
+// The small reference lists (states, districts, taluks, membership types, gothras, qualifications, particulars,
+// payment modes) are kept in memory for five minutes, so moving between pages does not read them again. Never stored
+// in the browser's storage; any change made to a master (a save, an edit, a delete) drops them at once.
+const REFERENCE_TTL_MS = 5 * 60 * 1000;
+const referenceCache = new Map(); // key -> { at, promise }
+const cached = (key, read) => async () => {
+  const hit = referenceCache.get(key);
+  if (hit && Date.now() - hit.at < REFERENCE_TTL_MS) return hit.promise.then(copyOf);
+  const promise = read().catch((error) => {
+    referenceCache.delete(key);
+    throw error;
+  });
+  referenceCache.set(key, { at: Date.now(), promise });
+  return promise.then(copyOf);
+};
+const copyOf = (value) => (Array.isArray(value)
+  ? [...value]
+  : value && typeof value === 'object'
+    ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, Array.isArray(v) ? [...v] : v]))
+    : value);
+export const forgetReferenceLists = () => referenceCache.clear();
+api.interceptors.response.use((res) => {
+  const method = String(res?.config?.method || 'get').toLowerCase();
+  if (method !== 'get' && /\/masters\//.test(String(res?.config?.url || ''))) referenceCache.clear();
+  return res;
+});
+
 // ── Locations (states / districts / taluks / PIN codes) ──────────────────
-export const loadLocations = async () => {
-  const [st, dt, tk, pc] = await Promise.all([
+// The 15,000-row PIN table is never downloaded: a screen asks the server for the PINs it needs (searchPostalCodes /
+// lookupPin), one PIN or one autocomplete at a time. loadLocations returns the small lists only (states, districts,
+// taluks), and `postalCodes` stays an empty list for the screens that still destructure it.
+export const loadLocations = cached('locations', async () => {
+  const [st, dt, tk] = await Promise.all([
     api.get('/masters/states', { params: { limit: 2000 } }),
     api.get('/masters/districts', { params: { limit: 2000 } }),
     api.get('/masters/taluks', { params: { limit: 25000 } }),
-    api.get('/masters/postal-codes', { params: { limit: 25000 } }),
   ]);
 
   const states = rows(st).map((s) => ({ id: s.id, name: s.name_en, status: statusLabel(s.status) }));
@@ -39,22 +68,32 @@ export const loadLocations = async () => {
       status: statusLabel(t.status),
     };
   });
-  const talukName = new Map(taluks.map((t) => [t.id, t.name]));
+  return { states, districts, taluks, postalCodes: [] };
+});
 
-  const postalCodes = rows(pc).map((p) => ({
+// The server's PIN directory, asked for just what is needed: { pincode_starts } for a lookup or autocomplete,
+// { search } for a post office name. The names come with each row.
+export const searchPostalCodes = async (params = {}, limit = 20) => {
+  const res = await api.get('/masters/postal-codes', { params: { limit, ...params } });
+  return rows(res).map((p) => ({
     id: p.id,
     postalCode: p.pincode,
     area: p.post_office_name,
     stateId: p.state_id,
     districtId: p.district_id,
     talukId: p.taluk_id,
-    stateName: stateName.get(p.state_id) || '',
-    districtName: districtById.get(p.district_id)?.name || '',
-    talukName: talukName.get(p.taluk_id) || '',
+    stateName: p.state_name || '',
+    districtName: p.district_name || '',
+    talukName: p.taluk_name || '',
     status: statusLabel(p.status),
   }));
+};
 
-  return { states, districts, taluks, postalCodes };
+// One PIN, asked of the server: the same answer findLocationByPin gives, from the rows for that PIN only.
+export const lookupPin = async (pin) => {
+  const clean = String(pin || '').trim();
+  if (!/^\d{6}$/.test(clean)) return { found: false, matches: [] };
+  return findLocationByPin(await searchPostalCodes({ pincode_starts: clean }, 100), clean);
 };
 
 // PIN code -> state / district / taluk, from an already loaded list of postal codes.
@@ -81,7 +120,7 @@ export const findLocationByPin = (postalCodes, pinCode) => {
 };
 
 // ── Membership types, gotras, particulars, payment modes ─────────────────
-export const loadMembershipTypes = async () => {
+export const loadMembershipTypes = cached('membership-types', async () => {
   const res = await api.get('/masters/membership-types', { params: { limit: 1000 } });
   return rows(res).map((m) => ({
     id: m.id,
@@ -90,19 +129,19 @@ export const loadMembershipTypes = async () => {
     currentPrice: Number(m.current_price || 0),
     status: statusLabel(m.status),
   }));
-};
+});
 
-export const loadGothras = async () => {
+export const loadGothras = cached('gothras', async () => {
   const res = await api.get('/masters/gotras', { params: { limit: 1000 } });
   return rows(res).filter((g) => g.status !== false).map((g) => g.name_en || g.name);
-};
+});
 
-export const loadQualifications = async () => {
+export const loadQualifications = cached('qualifications', async () => {
   const res = await api.get('/masters/qualifications', { params: { limit: 1000 } });
   return rows(res).filter((q) => q.status !== false).map((q) => q.name_en || q.name);
-};
+});
 
-export const loadParticulars = async () => {
+export const loadParticulars = cached('particulars', async () => {
   const res = await api.get('/masters/particulars', { params: { limit: 2000 } });
   const all = rows(res);
   return all
@@ -111,13 +150,16 @@ export const loadParticulars = async () => {
       id: p.id,
       name: p.name_en,
       status: statusLabel(p.status),
+      // the two ticks on the main particular (a sub type follows it)
+      paysForMembership: Boolean(p.pays_for_membership),
+      needsDescription: Boolean(p.needs_description),
       subTypes: all
         .filter((c) => c.parent_id === p.id)
         .map((c) => ({ id: c.id, name: c.name_en, status: statusLabel(c.status) })),
     }));
-};
+});
 
-export const loadPaymentModeConfigs = async () => {
+export const loadPaymentModeConfigs = cached('payment-modes', async () => {
   const [banksRes, modesRes] = await Promise.all([
     api.get('/masters/banks', { params: { limit: 1000 } }),
     api.get('/masters/payment-modes', { params: { limit: 1000 } }),
@@ -136,47 +178,22 @@ export const loadPaymentModeConfigs = async () => {
       status: statusLabel(m.status),
     };
   });
-};
+});
 
 // ── Members, receipts, renewals ──────────────────────────────────────────
-export const loadMembers = (params) => fetchMembers(params);
-export const loadReceipts = (params) => fetchReceipts(params);
-
-export const loadRenewals = async () => {
-  const res = await api.get('/receipts/renewals-due', { params: { limit: 500 } });
-  return rows(res).map((row) => ({
-    ...row,
-    id: row.membership_id || row.member_id,
-    registrationNumber: row.member_code || row.member_id,
-    name: row.member_name,
-    membershipNumber: row.membership_number,
-    membershipName: row.member_name,
-    contactNumber: row.mobile,
-    membershipType: row.membership_type,
-  }));
-};
-
-// Members waiting for approval, each with whether a receipt has been mapped to
-// them (the server records that as a receipt allocation).
-export const loadUnapprovedMembers = async () => {
-  const [members, receipts] = await Promise.all([
-    fetchMembers({ approval_status: 'UNAPPROVED' }),
-    fetchReceipts(),
-  ]);
-  const receiptByMember = new Map();
-  receipts.forEach((r) => {
-    if (r.memberId != null && !receiptByMember.has(String(r.memberId))) {
-      receiptByMember.set(String(r.memberId), r);
-    }
-  });
-  return members.map((m) => {
-    const receipt = receiptByMember.get(String(m.id));
+// One page of the members waiting for approval (rule 10.6): each row carries the receipt mapped to it, if any,
+// and `summary` has the with / without receipt counts of the whole filtered set.
+export const loadUnapprovedPage = async (params = {}) => {
+  const page = await fetchMemberPage({ approval_status: 'UNAPPROVED', with_receipt: true, ...params });
+  const rows = page.rows.map((m) => {
+    const receipt = m.receipt ? normalizeReceipt(m.receipt) : null;
     return {
       ...m,
       receiptStatus: receipt ? 'Assigned' : 'Pending',
       assignedReceiptNumber: receipt ? receipt.receiptNumber : '',
-      receipt: receipt || null,
+      receipt,
       registrationDate: m.created_at ? String(m.created_at).slice(0, 10) : '',
     };
   });
+  return { ...page, rows };
 };

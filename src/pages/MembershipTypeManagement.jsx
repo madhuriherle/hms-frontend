@@ -1,5 +1,5 @@
+import FilterToggle from '../components/FilterToggle';
 import React, { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import Modal from '../components/Modal';
 import {
   Tag,
@@ -7,22 +7,15 @@ import {
   Search,
   Pencil,
   Trash2,
-  Eye,
   History,
   TrendingUp,
-  Power,
   ChevronRight,
   ChevronLeft,
   CheckCircle2,
   X,
   AlertCircle,
-  AlertTriangle,
   RefreshCw,
-  Calendar,
-  Clock,
-  Globe,
-  Check,
-  FileText
+  FileText,
 } from 'lucide-react';
 import api from '../api';
 import { formatDate as formatDateShared } from '../utils/dateUtils';
@@ -32,22 +25,18 @@ import DateInput from '../components/DateInput';
 const formatDate = (v) => (v === 'Present' ? v : formatDateShared(v));
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
+import { formatMoney } from '../utils/money';
 
-// Helper to format currency in Indian Rupee format
-const formatINR = (amount) => {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 0
-  }).format(amount || 0);
-};
 
+import ModalFooter from '../components/ModalFooter';
 export default function MembershipTypeManagement() {
   const { hasPermission } = useAuth();
 
   // Master state
   const [membershipTypes, setMembershipTypes] = useState([]);
+
 
   const fetchMembershipTypes = async () => {
     try {
@@ -57,6 +46,8 @@ export default function MembershipTypeManagement() {
         name: m.name_en,
         code: m.code,
         currentPrice: m.current_price || 0,
+        priceCount: m.price_count || 0,
+        chartColor: m.chart_color || '',
         status: m.status ? 'Active' : 'Inactive',
         effectiveFrom: 'Present',
         priceHistory: [] // Can fetch lazily or in another call
@@ -88,13 +79,12 @@ export default function MembershipTypeManagement() {
   const [formData, setFormData] = useState({
     name: '',
     amount: '',
-    onlineList: 'Yes',
+    chartColor: '',
     status: 'Active'
   });
   const [formErrors, setFormErrors] = useState({});
 
   // Delete Confirmation Modal State
-  const [deletingItem, setDeletingItem] = useState(null);
 
   // Update Price Modal State
   const [isUpdatePriceOpen, setIsUpdatePriceOpen] = useState(false);
@@ -127,13 +117,6 @@ export default function MembershipTypeManagement() {
   // ----------------------------------------------------
   // SUMMARY METRICS
   // ----------------------------------------------------
-  const summaryStats = useMemo(() => {
-    const total = membershipTypes.length;
-    const active = membershipTypes.filter(m => m.status === 'Active').length;
-    const inactive = membershipTypes.filter(m => m.status === 'Inactive').length;
-    const onlineCount = membershipTypes.filter(m => (m.onlineList || 'Yes') === 'Yes').length;
-    return { total, active, inactive, onlineCount };
-  }, [membershipTypes]);
 
   // ----------------------------------------------------
   // SEARCH & FILTERING
@@ -145,6 +128,7 @@ export default function MembershipTypeManagement() {
   };
 
   const hasActiveFilters = searchQuery !== '' || statusFilter !== 'ALL';
+  const [filtersOpen, setFiltersOpen] = useState(false); // the filters show only when the filter icon is clicked
 
   const filteredData = useMemo(() => {
     return membershipTypes.filter((item) => {
@@ -176,7 +160,7 @@ export default function MembershipTypeManagement() {
     setFormData({
       name: '',
       amount: '',
-      onlineList: 'Yes',
+      chartColor: '',
       status: 'Active'
     });
     setFormErrors({});
@@ -189,7 +173,7 @@ export default function MembershipTypeManagement() {
     setFormData({
       name: item.name || '',
       amount: String(item.currentPrice || ''),
-      onlineList: item.onlineList || 'Yes',
+      chartColor: item.chartColor || '',
       status: item.status || 'Active'
     });
     setFormErrors({});
@@ -246,10 +230,9 @@ export default function MembershipTypeManagement() {
       const isActive = formData.status === 'Active';
 
       if (modalMode === 'add') {
-        const typeCode = formData.name.substring(0, 3).toUpperCase() + Date.now().toString().slice(-4);
         const res = await api.post('/masters/membership-types', {
-          code: typeCode,
           name_en: formData.name,
+          chart_color: formData.chartColor || null,
           status: isActive
         });
         
@@ -261,10 +244,26 @@ export default function MembershipTypeManagement() {
         
         showToast(`Membership Type "${formData.name}" added successfully.`);
       } else {
+        // the amount on this form is the type's price: a changed amount is a new price revision (kept in the history)
+        let priceResult = null;
+        if (Number.isFinite(amountVal) && amountVal !== Number(editingItem.currentPrice)) {
+          priceResult = await api.post(`/masters/membership-types/${editingItem.id}/prices`, {
+            amount: amountVal,
+            effective_from: today,
+            change_reason: 'Changed while editing the membership type'
+          });
+        }
         await api.put(`/masters/membership-types/${editingItem.id}`, {
           name_en: formData.name,
+          chart_color: formData.chartColor || null,
           status: isActive
         });
+        if (isPendingApproval(priceResult?.data)) {
+          showToast(`Price change for "${formData.name}" submitted for approval.`);
+          setIsAddEditOpen(false);
+          fetchMembershipTypes();
+          return;
+        }
         
         showToast(`Membership Type "${formData.name}" updated successfully.`);
       }
@@ -287,7 +286,7 @@ export default function MembershipTypeManagement() {
         effectiveFrom: p.effective_from,
         effectiveTo: p.effective_to || 'Present',
         reason: p.change_reason || '',
-        changedAt: p.created_at ? String(p.created_at).slice(0, 10) : ''
+        changedAt: (p.updated_at || p.created_at) ? String(p.updated_at || p.created_at).slice(0, 10) : ''
       }));
       setHistoryTargetItem({
         ...item,
@@ -364,7 +363,7 @@ export default function MembershipTypeManagement() {
       showToast(
         isPendingApproval(data)
           ? `Price change for "${target.name}" submitted for approval.`
-          : `Price for "${target.name}" updated to ${formatINR(Number(priceFormData.newPrice))}.`
+          : `Price for "${target.name}" updated to ${formatMoney(Number(priceFormData.newPrice))}.`
       );
       setIsUpdatePriceOpen(false);
       await fetchMembershipTypes();
@@ -399,6 +398,20 @@ export default function MembershipTypeManagement() {
     }
     setStatusDialog(null);
   };
+
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => ({
+      title: `${d.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} membership type?`,
+      text: d.newStatus === 'Inactive'
+        ? `Deactivate ${d.item.name}? Inactive membership types will not be available for new registrations.`
+        : `Activate ${d.item.name}? It will become available for member registrations.`,
+      confirmText: d.newStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+      danger: d.newStatus === 'Inactive',
+    }),
+    handleConfirmStatusToggle
+  );
 
   return (
     <PermissionGate required="masters.membership_types.read">
@@ -443,29 +456,26 @@ export default function MembershipTypeManagement() {
         )}
       </Modal>
 
-      {/* Breadcrumb & Header */}
-      <div>
-<div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-              Membership Types
-            </h1>
-          </div>
-
+      {/* Action Bar */}
+      <div className="flex items-center justify-end gap-2 -mb-2">
+        <FilterToggle open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)} count={statusFilter !== 'ALL' ? 1 : 0} />
+        {/* The Recently deleted button is hidden (the RecentlyDeleted component is kept to bring it back):
+        {hasPermission('masters.membership_types.delete') && <RecentlyDeleted kind="membership-types" label="membership types" onRestored={fetchMembershipTypes} />}
+        */}
+        {hasPermission('masters.membership_types.write') && (
           <button
             onClick={openAddModal}
-            disabled={!hasPermission('masters.membership_types.write')}
-            title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : undefined}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer self-start sm:self-auto"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Add Membership Type</span>
           </button>
-        </div>
+        )}
       </div>
 
       {/* Search and Filters Toolbar Card */}
-      <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
+      {filtersOpen && (
+<div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
 
             {/* Search Input */}
@@ -490,7 +500,7 @@ export default function MembershipTypeManagement() {
 
             {/* Filter Controls */}
             <div className="flex items-center gap-2.5 flex-wrap">
-              <select
+                            <select
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
                 className="py-2 px-3.5 bg-white border border-[#E8DFD8] rounded-xl text-sm text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601] shadow-sm cursor-pointer"
@@ -510,10 +520,11 @@ export default function MembershipTypeManagement() {
                   <span>Clear Filters</span>
                 </button>
               )}
-            </div>
+                            </div>
 
           </div>
       </div>
+      )}
 
       {/* Membership Types Table Card */}
       <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] overflow-hidden">
@@ -532,7 +543,7 @@ export default function MembershipTypeManagement() {
             <tbody className="divide-y divide-[#E8DFD8] text-sm">
               {paginatedData.length > 0 ? (
                 paginatedData.map((item, index) => {
-                  const historyCount = item.priceHistory ? item.priceHistory.length : 1;
+                  const historyCount = item.priceHistory?.length || item.priceCount || 1;
                   const revisionsCount = historyCount - 1;
                   const isActive = item.status === 'Active';
 
@@ -549,7 +560,7 @@ export default function MembershipTypeManagement() {
 
                       {/* Amount */}
                       <td className="px-5 py-4 font-mono font-bold text-[#510601] text-base text-right">
-                        {formatINR(item.currentPrice)}
+                        {formatMoney(item.currentPrice)}
                       </td>
 
                       {/* Status (Active / Inactive Toggle) */}
@@ -558,13 +569,12 @@ export default function MembershipTypeManagement() {
                           type="button"
                           disabled={!hasPermission('masters.membership_types.write')}
                           onClick={() => promptToggleStatus(item)}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${isActive
-                            ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 border border-[#3D705C]/20'
-                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                          className={`text-xs font-semibold cursor-pointer ${isActive
+                            ? 'chip chip-on'
+                            : 'chip chip-off'
                             }`}
                           title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : `Click to set as ${isActive ? 'Inactive' : 'Active'}`}
                         >
-                          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                           <span>{item.status}</span>
                         </button>
                       </td>
@@ -585,28 +595,30 @@ export default function MembershipTypeManagement() {
 
                       {/* Action Column: Edit, Delete */}
                       <td className="px-5 py-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5 flex-nowrap">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
                           {/* Edit Button */}
-                          <button
-                            onClick={() => openEditModal(item)}
-                            disabled={!hasPermission('masters.membership_types.write')}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : 'Edit Membership Type'}
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
+                          {hasPermission('masters.membership_types.write') && (
+                            <button
+                              onClick={() => openEditModal(item)}
+                              className="btn-act"
+                              title={'Edit Membership Type'}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+                          )}
 
                           {/* Delete Button */}
-                          <button
-                            onClick={() => handleConfirmDelete(item)}
-                            disabled={!hasPermission('masters.membership_types.delete')}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={!hasPermission('masters.membership_types.delete') ? 'Requires masters.membership_types.delete permission' : 'Delete Membership Type'}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>Delete</span>
-                          </button>
+                          {hasPermission('masters.membership_types.delete') && (
+                            <button
+                              onClick={() => handleConfirmDelete(item)}
+                              className="btn-act btn-act-danger"
+                              title={'Delete Membership Type'}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete</span>
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -633,14 +645,15 @@ export default function MembershipTypeManagement() {
                           Clear Filters
                         </button>
                       ) : (
-                        <button
-                          onClick={openAddModal}
-                          disabled={!hasPermission('masters.membership_types.write')}
-                          title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : undefined}
-                          className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                        >
-                          Add Membership Type
-                        </button>
+                        hasPermission('masters.membership_types.write') && (
+                          <button
+                            onClick={openAddModal}
+
+                            className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                          >
+                            Add Membership Type
+                          </button>
+                        )
                       )}
                     </div>
                   </td>
@@ -651,7 +664,7 @@ export default function MembershipTypeManagement() {
         </div>
 
         {/* Pagination Section */}
-        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3 text-xs text-[#863221] font-medium">
             <span>
               Showing {filteredData.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} to{' '}
@@ -730,7 +743,7 @@ export default function MembershipTypeManagement() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Tag className="w-5 h-5" />
@@ -803,47 +816,27 @@ export default function MembershipTypeManagement() {
               )}
             </div>
 
-            {/* 3. Online List (Yes/No) */}
+            {/* 3. Status (Active/Inactive) */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                Online List <span className="text-[#ED4636]">*</span>
+                Dashboard colour
               </label>
-              <div className="grid grid-cols-2 gap-3">
-                <label className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border cursor-pointer font-semibold text-xs transition-all ${formData.onlineList === 'Yes'
-                  ? 'border-[#510601] bg-[#510601]/5 text-[#510601] ring-1 ring-[#510601]'
-                  : 'border-[#E8DFD8] bg-white text-gray-700 hover:bg-gray-50'
-                  }`}>
-                  <input
-                    type="radio"
-                    name="onlineList"
-                    value="Yes"
-                    checked={formData.onlineList === 'Yes'}
-                    onChange={handleFormChange}
-                    className="sr-only"
-                  />
-                  <Check className={`w-4 h-4 ${formData.onlineList === 'Yes' ? 'text-[#510601]' : 'text-gray-400'}`} />
-                  <span>Yes (Online)</span>
-                </label>
-
-                <label className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border cursor-pointer font-semibold text-xs transition-all ${formData.onlineList === 'No'
-                  ? 'border-[#510601] bg-[#510601]/5 text-[#510601] ring-1 ring-[#510601]'
-                  : 'border-[#E8DFD8] bg-white text-gray-700 hover:bg-gray-50'
-                  }`}>
-                  <input
-                    type="radio"
-                    name="onlineList"
-                    value="No"
-                    checked={formData.onlineList === 'No'}
-                    onChange={handleFormChange}
-                    className="sr-only"
-                  />
-                  <X className={`w-4 h-4 ${formData.onlineList === 'No' ? 'text-[#510601]' : 'text-gray-400'}`} />
-                  <span>No (Offline only)</span>
-                </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="color"
+                  value={formData.chartColor || '#863221'}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, chartColor: e.target.value }))}
+                  className="h-10 w-14 rounded-lg border border-[#E8DFD8] bg-white cursor-pointer"
+                />
+                <span className="text-xs text-[#863221]">{formData.chartColor || 'Automatic'}</span>
+                {formData.chartColor && (
+                  <button type="button" onClick={() => setFormData((prev) => ({ ...prev, chartColor: '' }))} className="text-xs font-semibold text-[#8C1801] hover:underline">
+                    Use automatic
+                  </button>
+                )}
               </div>
             </div>
 
-            {/* 4. Status (Active/Inactive) */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
                 Status
@@ -860,22 +853,7 @@ export default function MembershipTypeManagement() {
             </div>
 
             {/* Action Buttons */}
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsAddEditOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-6 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-bold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-1.5"
-              >
-                <Check className="w-4 h-4" />
-                <span>Save</span>
-              </button>
-            </div>
+            <ModalFooter kind={modalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsAddEditOpen(false)} inForm />
 
           </form>
         </div>
@@ -896,7 +874,7 @@ export default function MembershipTypeManagement() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                   <TrendingUp className="w-5 h-5" />
@@ -922,7 +900,7 @@ export default function MembershipTypeManagement() {
                 <div>
                   <p className="text-[11px] font-semibold text-[#863221] uppercase">Current Active Price</p>
                   <p className="text-xl font-mono font-bold text-[#510601] mt-0.5">
-                    {formatINR(priceTargetItem.currentPrice)}
+                    {formatMoney(priceTargetItem.currentPrice)}
                   </p>
                 </div>
                 <div className="text-right">
@@ -998,21 +976,7 @@ export default function MembershipTypeManagement() {
               </div>
 
               {/* Actions */}
-              <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-                <button
-                  type="button"
-                  onClick={() => setIsUpdatePriceOpen(false)}
-                  className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
-                >
-                  Update Price
-                </button>
-              </div>
+              <ModalFooter kind="edit" onCancel={() => setIsUpdatePriceOpen(false)} inForm />
 
             </form>
           </div>
@@ -1032,7 +996,7 @@ export default function MembershipTypeManagement() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2] shrink-0">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                   <History className="w-5 h-5" />
@@ -1059,27 +1023,28 @@ export default function MembershipTypeManagement() {
                 <div>
                   <span className="text-[11px] font-bold text-[#863221] uppercase tracking-wider">Current Active Price</span>
                   <p className="text-2xl font-mono font-bold text-[#510601] mt-0.5">
-                    {formatINR(historyTargetItem.currentPrice)}
+                    {formatMoney(historyTargetItem.currentPrice)}
                   </p>
                   <span className="text-xs text-[#863221]/80 mt-0.5 block">
                     Applicable from {formatDate(historyTargetItem.effectiveFrom)}
                   </span>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={!hasPermission('masters.membership_types.write')}
-                  title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : undefined}
-                  onClick={() => {
-                    const item = historyTargetItem;
-                    setHistoryTargetItem(null);
-                    openUpdatePriceModal(item);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer self-start sm:self-auto"
-                >
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  <span>Update Price</span>
-                </button>
+                {hasPermission('masters.membership_types.write') && (
+                  <button
+                    type="button"
+
+                    onClick={() => {
+                      const item = historyTargetItem;
+                      setHistoryTargetItem(null);
+                      openUpdatePriceModal(item);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer self-start sm:self-auto"
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    <span>Update Price</span>
+                  </button>
+                )}
               </div>
 
               {/* Price History Table */}
@@ -1088,8 +1053,8 @@ export default function MembershipTypeManagement() {
                   <thead className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-[#863221] font-semibold uppercase tracking-wider">
                     <tr>
                       <th className="px-4 py-3 text-right">Price</th>
-                      <th className="px-4 py-3">Effective From</th>
-                      <th className="px-4 py-3">Effective To</th>
+                      <th className="px-4 py-3">From</th>
+                      <th className="px-4 py-3">To</th>
                       <th className="px-4 py-3">Changed On</th>
                       <th className="px-4 py-3">Reason</th>
                     </tr>
@@ -1101,7 +1066,7 @@ export default function MembershipTypeManagement() {
                         return (
                           <tr key={ph.id || idx} className={isCurrent ? 'bg-[#3D705C]/5' : 'hover:bg-[#FAF7F2]/40'}>
                             <td className="px-4 py-3 font-mono font-bold text-[#510601] text-right text-sm">
-                              {formatINR(ph.price)}
+                              {formatMoney(ph.price)}
                             </td>
                             <td className="px-4 py-3 font-medium text-[#180200]">
                               {formatDate(ph.effectiveFrom)}
@@ -1121,7 +1086,7 @@ export default function MembershipTypeManagement() {
                             <td className="px-4 py-3 text-[#863221]/80">
                               {formatDate(ph.changedAt)}
                             </td>
-                            <td className="px-4 py-3 text-[#180200]/90 max-w-[200px] truncate" title={ph.reason}>
+                            <td className="px-4 py-3 text-[#180200]/90 max-w-[260px] break-words" title={ph.reason}>
                               {ph.reason || '—'}
                             </td>
                           </tr>
@@ -1141,15 +1106,7 @@ export default function MembershipTypeManagement() {
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-end px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] shrink-0">
-              <button
-                type="button"
-                onClick={() => setHistoryTargetItem(null)}
-                className="px-4 py-2 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
+            <ModalFooter kind="view" onCancel={() => setHistoryTargetItem(null)} />
           </div>
         )}
       </Modal>
@@ -1167,7 +1124,7 @@ export default function MembershipTypeManagement() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                   <FileText className="w-5 h-5" />
@@ -1191,14 +1148,13 @@ export default function MembershipTypeManagement() {
                 <div>
                   <p className="text-xs font-medium text-[#863221]">Current Active Price</p>
                   <p className="text-2xl font-mono font-bold text-[#510601] mt-0.5">
-                    {formatINR(viewingItem.currentPrice)}
+                    {formatMoney(viewingItem.currentPrice)}
                   </p>
                 </div>
                 <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${viewingItem.status === 'Active'
                   ? 'bg-[#3D705C]/10 text-[#3D705C] border border-[#3D705C]/20'
                   : 'bg-gray-100 text-gray-600 border border-gray-200'
                   }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${viewingItem.status === 'Active' ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                   {viewingItem.status}
                 </span>
               </div>
@@ -1207,11 +1163,6 @@ export default function MembershipTypeManagement() {
                 <div className="col-span-2">
                   <p className="text-xs text-[#863221] font-semibold uppercase">Membership Type</p>
                   <p className="text-base font-bold text-[#180200] mt-0.5">{viewingItem.name}</p>
-                </div>
-
-                <div>
-                  <p className="text-xs text-[#863221] font-semibold uppercase">Online List</p>
-                  <p className="text-sm font-bold text-[#180200] mt-0.5">{viewingItem.onlineList || 'Yes'}</p>
                 </div>
 
                 <div>
@@ -1231,77 +1182,8 @@ export default function MembershipTypeManagement() {
               </div>
 
               {/* Read-only footer */}
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-[#E8DFD8]">
-                <button
-                  type="button"
-                  onClick={() => setViewingItem(null)}
-                  className="px-4 py-2 border border-[#E8DFD8] text-[#863221] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
+              <ModalFooter kind="view" onCancel={() => setViewingItem(null)} inForm />
 
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* ============================================================ */}
-      {/* ACTIVATE / DEACTIVATE CONFIRMATION MODAL                     */}
-      {/* ============================================================ */}
-      <Modal
-        isOpen={Boolean(statusDialog)}
-        onClose={() => setStatusDialog(null)}
-      >
-        {statusDialog && (
-          <div
-            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3.5 ${statusDialog.newStatus === 'Inactive' ? 'bg-red-100 text-[#ED4636]' : 'bg-[#3D705C]/10 text-[#3D705C]'
-              }`}>
-              {statusDialog.newStatus === 'Inactive' ? (
-                <AlertTriangle className="w-7 h-7" />
-              ) : (
-                <CheckCircle2 className="w-7 h-7" />
-              )}
-            </div>
-
-            <h3 className="text-lg font-bold text-[#180200]">
-              {statusDialog.newStatus === 'Inactive' ? 'Deactivate Membership Type?' : 'Activate Membership Type?'}
-            </h3>
-            <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-              {statusDialog.newStatus === 'Inactive' ? (
-                <>
-                  Are you sure you want to deactivate <strong className="text-[#180200]">{statusDialog.item.name}</strong>? Inactive membership types will not be available for new registrations.
-                </>
-              ) : (
-                <>
-                  Are you sure you want to activate <strong className="text-[#180200]">{statusDialog.item.name}</strong>? It will become available for member registrations.
-                </>
-              )}
-            </p>
-
-            <div className="mt-6 flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setStatusDialog(null)}
-                className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.membership_types.write')}
-                title={!hasPermission('masters.membership_types.write') ? 'Requires masters.membership_types.write permission' : undefined}
-                onClick={handleConfirmStatusToggle}
-                className={`w-full py-2.5 px-4 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer ${statusDialog.newStatus === 'Inactive'
-                  ? 'bg-[#ED4636] hover:bg-[#C93324]'
-                  : 'bg-[#3D705C] hover:bg-[#2F5647]'
-                  }`}
-              >
-                {statusDialog.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'}
-              </button>
             </div>
           </div>
         )}

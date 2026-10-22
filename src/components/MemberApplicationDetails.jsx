@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { User, CreditCard } from 'lucide-react';
 import { formatDate } from '../utils/dateUtils';
+import { formatMoney } from '../utils/money';
 
 // The details captured on the Register New Member form, shown in the member popups.
 // `member` is a member as returned by normalizeMember (server data).
@@ -38,7 +39,35 @@ export default function MemberApplicationDetails({ member }) {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
           <Field label="Title" value={member.nameTitle} />
-          <Field label="Father / Husband Name" value={member.fatherHusbandName} />
+          <Field
+            label="Father Name"
+            value={
+              member.fatherName
+                ? `${member.fatherName}${member.fatherMembershipNumber ? ` (${member.fatherMembershipNumber})` : ''}`
+                : member.fatherHusbandName
+            }
+          />
+          {member.motherName ? (
+            <Field
+              label="Mother Name"
+              value={`${member.motherName}${member.motherMembershipNumber ? ` (${member.motherMembershipNumber})` : ''}`}
+            />
+          ) : null}
+          {member.spouseName ? (
+            <Field
+              label="Spouse Name"
+              value={`${member.spouseName}${member.spouseMembershipNumber ? ` (${member.spouseMembershipNumber})` : ''}`}
+            />
+          ) : null}
+          {Array.isArray(member.childrenDetails) && member.childrenDetails.length > 0 ? (
+            <Field
+              label="Children"
+              value={member.childrenDetails
+                .map((c) => `${c.name}${c.gender ? ` (${c.gender})` : ''}${c.membership_number ? ` [${c.membership_number}]` : ''}`)
+                .join(', ')}
+              wide
+            />
+          ) : null}
           <Field
             label="Date of Birth"
             value={member.birthDate ? `${formatDate(member.birthDate)}${member.age ? ` (${member.age} yrs)` : ''}` : ''}
@@ -66,7 +95,7 @@ export default function MemberApplicationDetails({ member }) {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <Field label="Payment Mode" value={pay.payment_mode} />
             <Field label="Bank Account" value={pay.bank_account} />
-            <Field label="Amount" value={pay.amount !== null && pay.amount !== undefined ? `₹${Number(pay.amount).toLocaleString('en-IN')}` : ''} mono />
+            <Field label="Amount" value={pay.amount !== null && pay.amount !== undefined ? `${formatMoney(pay.amount)}` : ''} mono />
             <Field label="Receipt Date" value={pay.receipt_date ? formatDate(pay.receipt_date) : ''} />
             <Field label="Transaction ID / Cheque No." value={pay.transaction_id} mono />
             <Field label="Transaction Date" value={pay.transaction_date ? formatDate(pay.transaction_date) : ''} />

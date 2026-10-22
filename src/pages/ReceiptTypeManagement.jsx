@@ -1,5 +1,5 @@
+import FilterToggle from '../components/FilterToggle';
 import React, { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import Modal from '../components/Modal';
 import {
   FileText,
@@ -9,24 +9,28 @@ import {
   Trash2,
   ChevronRight,
   ChevronDown,
+  GripVertical,
   ChevronLeft,
   CheckCircle2,
   X,
   AlertCircle,
   AlertTriangle,
   RefreshCw,
-  Layers
+  Layers,
 } from 'lucide-react';
 import api from '../api';
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
 
+import ModalFooter from '../components/ModalFooter';
 export default function ReceiptTypeManagement() {
   const { hasPermission } = useAuth();
 
   // Master state
   const [receiptTypes, setReceiptTypes] = useState([]);
+  const [serviceTypes, setServiceTypes] = useState([]);
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -37,7 +41,7 @@ export default function ReceiptTypeManagement() {
   const [pageSize, setPageSize] = useState(10);
 
   // Expandable row state (expanded receipt type IDs)
-  const [expandedRows, setExpandedRows] = useState({ 3: true }); // Donation expanded by default
+  const [expandedRows, setExpandedRows] = useState({}); // groups start closed; a click opens one
 
   // Modal States - Particular (Add/Edit)
   const [isTypeModalOpen, setIsTypeModalOpen] = useState(false);
@@ -45,6 +49,7 @@ export default function ReceiptTypeManagement() {
   const [editingType, setEditingType] = useState(null);
   const [typeFormData, setTypeFormData] = useState({
     name: '',
+    serviceTypeId: '',
     status: 'Active',
     subTypes: []
   });
@@ -77,7 +82,30 @@ export default function ReceiptTypeManagement() {
   };
 
 
+  const canReorder = hasPermission('masters.particulars.write') && !searchQuery;
+
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
+
+  const dropType = async (targetId) => {
+    const fromId = dragId;
+    setDragId(null);
+    setOverId(null);
+    if (fromId == null || fromId === targetId) return;
+    const ids = receiptTypes.map((t) => t.id).filter((id) => id !== fromId);
+    const at = ids.indexOf(targetId);
+    if (at < 0) return;
+    ids.splice(at, 0, fromId);
+    try {
+      await api.put('/masters/particulars-order', { ids }, { params: { reason: 'Reordered particulars' } });
+      await fetchReceiptTypes();
+    } catch (error) {
+      showToast(error.response?.data?.detail || 'Could not save the new order.', 'error');
+    }
+  };
+
   const fetchReceiptTypes = async () => {
+    api.get('/masters/service-types?limit=200').then(({ data }) => setServiceTypes(data?.data || [])).catch(() => {});
     try {
       const res = await api.get('/masters/particulars?limit=2000');
       const allItems = res.data?.data || [];
@@ -92,13 +120,16 @@ export default function ReceiptTypeManagement() {
         return {
           id: p.id,
           name: p.name_en,
+          serviceTypeId: p.service_type_id ?? '',
+          paysForMembership: Boolean(p.pays_for_membership),
+          needsDescription: Boolean(p.needs_description),
           status: p.status ? 'Active' : 'Inactive',
           subTypes: subs
         };
       });
       setReceiptTypes(mapped);
     } catch (err) {
-      console.error(err);
+      console.error(err); showToast(err.response?.data?.detail || 'Could not load data from the server.', 'error');
     }
   };
 
@@ -126,6 +157,7 @@ export default function ReceiptTypeManagement() {
   };
 
   const hasActiveFilters = searchQuery !== '' || statusFilter !== 'ALL';
+  const [filtersOpen, setFiltersOpen] = useState(false); // the filters show only when the filter icon is clicked
 
   const filteredData = useMemo(() => {
     return receiptTypes.filter((item) => {
@@ -155,6 +187,9 @@ export default function ReceiptTypeManagement() {
     setEditingType(null);
     setTypeFormData({
       name: '',
+      serviceTypeId: '',
+      paysForMembership: false,
+      needsDescription: false,
       status: 'Active',
       subTypes: []
     });
@@ -167,6 +202,9 @@ export default function ReceiptTypeManagement() {
     setEditingType(type);
     setTypeFormData({
       name: type.name || '',
+      serviceTypeId: type.serviceTypeId ?? '',
+      paysForMembership: Boolean(type.paysForMembership),
+      needsDescription: Boolean(type.needsDescription),
       status: type.status || 'Active',
       subTypes: type.subTypes ? [...type.subTypes] : []
     });
@@ -210,19 +248,24 @@ export default function ReceiptTypeManagement() {
 
     const trimmedName = typeFormData.name.trim();
     const isActive = typeFormData.status === 'Active';
+    const serviceTypeId = typeFormData.serviceTypeId ? Number(typeFormData.serviceTypeId) : null;
 
     try {
       if (typeModalMode === 'add') {
-        const typeCode = trimmedName.substring(0,3).toUpperCase() + Date.now().toString().slice(-4);
         await api.post('/masters/particulars', {
-          code: typeCode,
           name_en: trimmedName,
+          service_type_id: serviceTypeId,
+          pays_for_membership: Boolean(typeFormData.paysForMembership),
+          needs_description: Boolean(typeFormData.needsDescription),
           status: isActive
         });
         showToast(`Particular "${trimmedName}" created successfully.`);
       } else {
         await api.put(`/masters/particulars/${editingType.id}`, {
           name_en: trimmedName,
+          service_type_id: serviceTypeId,
+          pays_for_membership: Boolean(typeFormData.paysForMembership),
+          needs_description: Boolean(typeFormData.needsDescription),
           status: isActive
         });
         showToast(`Particular "${trimmedName}" updated successfully.`);
@@ -303,9 +346,7 @@ export default function ReceiptTypeManagement() {
     try {
       let data;
       if (subTypeModalMode === 'add') {
-        const code = trimmedName.substring(0, 3).toUpperCase() + Date.now().toString().slice(-4);
         ({ data } = await api.post('/masters/particulars', {
-          code,
           name_en: trimmedName,
           parent_id: parent.id,
           status: isActive
@@ -413,6 +454,18 @@ export default function ReceiptTypeManagement() {
     setDeletingItem(null);
   };
 
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => ({
+      title: `${d.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} ${d.targetType === 'receiptType' ? 'particular' : 'sub-type'}?`,
+      text: `Are you sure you want to mark ${d.item.name} as ${d.newStatus}?`,
+      confirmText: d.newStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+      danger: d.newStatus === 'Inactive',
+    }),
+    handleConfirmStatusToggle
+  );
+
   return (
     <PermissionGate required="masters.particulars.read">
     <div className="space-y-6">
@@ -453,29 +506,26 @@ export default function ReceiptTypeManagement() {
         )}
       </Modal>
 
-      {/* Breadcrumb & Header */}
-      <div>
-<div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-              Particulars Master
-            </h1>
-          </div>
-
+      {/* Action Bar */}
+      <div className="flex items-center justify-end gap-2 -mb-2">
+        <FilterToggle open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)} count={statusFilter !== 'ALL' ? 1 : 0} />
+        {/* The Recently deleted button is hidden (the RecentlyDeleted component is kept to bring it back):
+        {hasPermission('masters.particulars.delete') && <RecentlyDeleted kind="particulars" label="particulars" onRestored={fetchReceiptTypes} />}
+        */}
+        {hasPermission('masters.particulars.write') && (
           <button
             onClick={openAddTypeModal}
-            disabled={!hasPermission('masters.particulars.write')}
-            title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : undefined}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer self-start sm:self-auto"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Add Particular</span>
           </button>
-        </div>
+        )}
       </div>
 
       {/* Search and Filters Toolbar Card */}
-      <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
+      {filtersOpen && (
+<div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] p-4 sm:p-5">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
 
             {/* Search Input */}
@@ -500,7 +550,7 @@ export default function ReceiptTypeManagement() {
 
             {/* Filter Controls */}
             <div className="flex items-center gap-2.5 flex-wrap">
-              <select
+                            <select
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
                 className="py-2 px-3.5 bg-white border border-[#E8DFD8] rounded-xl text-sm text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601] shadow-sm cursor-pointer"
@@ -520,10 +570,11 @@ export default function ReceiptTypeManagement() {
                   <span>Clear Filters</span>
                 </button>
               )}
-            </div>
+                            </div>
 
           </div>
       </div>
+      )}
 
       {/* Particulars Master Table Card */}
       <div className="bg-white rounded-2xl border border-[#E8DFD8] shadow-[0_4px_12px_-2px_rgba(24,2,0,0.04)] overflow-hidden">
@@ -531,7 +582,6 @@ export default function ReceiptTypeManagement() {
           <table className="w-full text-left border-collapse min-w-[700px]">
             <thead>
               <tr className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-xs font-semibold text-[#863221] uppercase tracking-wider">
-                <th className="px-5 py-3.5 w-12 text-center"></th>
                 <th className="px-5 py-3.5">Particular</th>
                 <th className="px-5 py-3.5">Sub-Types</th>
                 <th className="px-5 py-3.5 text-center">Status</th>
@@ -549,12 +599,25 @@ export default function ReceiptTypeManagement() {
                   return (
                     <React.Fragment key={type.id}>
                       {/* Parent Particular Row */}
-                      <tr className={`hover:bg-[#FAF7F2]/60 transition-colors group ${isExpanded ? 'bg-[#FAF7F2]/30' : ''}`}>
-
-                        {/* Number Index */}
-                        <td className="px-5 py-4 text-xs font-bold text-[#863221]/70 text-center">
-                          {(currentPage - 1) * pageSize + index + 1}
-                        </td>
+                      <tr
+                        className={`hover:bg-[#FAF7F2]/60 transition-colors group ${isExpanded ? 'bg-[#FAF7F2]/30' : ''} ${dragId === type.id ? 'opacity-40' : ''} ${overId === type.id && dragId !== type.id ? 'border-t-2 border-t-[#510601]' : ''}`}
+                        draggable={canReorder}
+                        onDragStart={() => canReorder && setDragId(type.id)}
+                        onDragOver={(e) => {
+                          if (dragId != null) {
+                            e.preventDefault();
+                            setOverId(type.id);
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          dropType(type.id);
+                        }}
+                        onDragEnd={() => {
+                          setDragId(null);
+                          setOverId(null);
+                        }}
+                      >
 
                         {/* Particular Name + Expand Chevron if sub-types exist */}
                         <td className="px-5 py-4 font-bold text-[#180200]">
@@ -575,7 +638,23 @@ export default function ReceiptTypeManagement() {
                             ) : (
                               <div className="w-6 h-4" />
                             )}
+                            {canReorder && (
+                              <GripVertical className="w-4 h-4 text-[#863221]/50 cursor-grab shrink-0" title="Drag to change the order" />
+                            )}
                             <span className="text-sm text-[#180200]">{type.name}</span>
+                            {type.paysForMembership && (
+                              <span className="ml-2 px-1.5 py-0.5 rounded-full bg-[#3D705C]/10 border border-[#3D705C]/30 text-[10px] font-semibold text-[#3D705C]" title="Counts toward a member's membership credit">
+                                pays for membership
+                              </span>
+                            )}
+                            {serviceTypes.find((s) => String(s.id) === String(type.serviceTypeId)) && (
+                              <span
+                                className="ml-2 px-1.5 py-0.5 rounded-full bg-[#510601]/10 border border-[#510601]/20 text-[10px] font-semibold text-[#510601]"
+                                title="Service this particular is counted under"
+                              >
+                                {serviceTypes.find((s) => String(s.id) === String(type.serviceTypeId)).name_en}
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -619,40 +698,43 @@ export default function ReceiptTypeManagement() {
 
                         {/* Action Buttons */}
                         <td className="px-5 py-4 text-right">
-                          <div className="flex items-center justify-end gap-1.5 flex-nowrap">
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
 
                             {/* Add Sub-Type Button */}
-                            <button
-                              onClick={() => openAddSubTypeModal(type)}
-                              disabled={!hasPermission('masters.particulars.write')}
-                              title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : `Add Sub-Type under ${type.name}`}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                              <span>Sub-Type</span>
-                            </button>
+                            {hasPermission('masters.particulars.write') && (
+                              <button
+                                onClick={() => openAddSubTypeModal(type)}
+                                title={`Add Sub-Type under ${type.name}`}
+                                className="btn-act"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Sub-Type</span>
+                              </button>
+                            )}
 
                             {/* Edit Button */}
-                            <button
-                              onClick={() => openEditTypeModal(type)}
-                              disabled={!hasPermission('masters.particulars.write')}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                              title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : 'Edit Particular'}
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                              <span>Edit</span>
-                            </button>
+                            {hasPermission('masters.particulars.write') && (
+                              <button
+                                onClick={() => openEditTypeModal(type)}
+                                className="btn-act"
+                                title={'Edit Particular'}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                                <span>Edit</span>
+                              </button>
+                            )}
 
                             {/* Delete Button */}
-                            <button
-                              onClick={() => promptDeleteType(type)}
-                              disabled={!hasPermission('masters.particulars.delete')}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                              title={!hasPermission('masters.particulars.delete') ? 'Requires masters.particulars.delete permission' : 'Delete Particular'}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete</span>
-                            </button>
+                            {hasPermission('masters.particulars.delete') && (
+                              <button
+                                onClick={() => promptDeleteType(type)}
+                                className="btn-act btn-act-danger"
+                                title={'Delete Particular'}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete</span>
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -660,30 +742,30 @@ export default function ReceiptTypeManagement() {
                       {/* Expanded Sub-Types Tree View */}
                       {isExpanded && hasSubTypes && (
                         <tr className="bg-[#FAF7F2]/40 border-b border-[#E8DFD8]">
-                          <td colSpan="5" className="p-0">
+                          <td colSpan="4" className="p-0">
                             <div className="py-3 px-6 sm:px-12 bg-[#FAF7F2]/60 border-y border-[#E8DFD8]/70">
                               <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2 text-xs font-bold text-[#863221] uppercase tracking-wider">
                                   <Layers className="w-4 h-4 text-[#510601]" />
                                   <span>Sub-Types under {type.name}</span>
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={() => openAddSubTypeModal(type)}
-                                  disabled={!hasPermission('masters.particulars.write')}
-                                  title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : undefined}
-                                  className="text-xs font-semibold text-[#510601] hover:text-[#8C1801] inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Plus className="w-3.5 h-3.5" />
-                                  <span>Add New Sub-Type</span>
-                                </button>
+                                {hasPermission('masters.particulars.write') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openAddSubTypeModal(type)}
+
+                                    className="text-xs font-semibold text-[#510601] hover:text-[#8C1801] inline-flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    <span>Add New Sub-Type</span>
+                                  </button>
+                                )}
                               </div>
 
                               <div className="border border-[#E8DFD8] rounded-xl overflow-hidden bg-white shadow-2xs">
                                 <table className="w-full text-left text-xs border-collapse">
                                   <thead>
                                     <tr className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-[11px] font-semibold text-[#863221] uppercase tracking-wider">
-                                      <th className="px-4 py-2.5 w-12 text-center"></th>
                                       <th className="px-4 py-2.5">Sub-Type Name</th>
                                       <th className="px-4 py-2.5 text-center">Status</th>
                                       <th className="px-4 py-2.5 text-right min-w-[140px]">Actions</th>
@@ -694,11 +776,6 @@ export default function ReceiptTypeManagement() {
                                       const isSubActive = sub.status === 'Active';
                                       return (
                                         <tr key={sub.id || sIdx} className="hover:bg-[#FAF7F2]/50 transition-colors">
-
-                                          {/* Sub-Type Number */}
-                                          <td className="px-4 py-3 text-center text-[#863221]/70 font-mono">
-                                            {sIdx + 1}
-                                          </td>
 
                                           {/* Sub-Type Name */}
                                           <td className="px-4 py-3 font-semibold text-[#180200]">
@@ -725,26 +802,28 @@ export default function ReceiptTypeManagement() {
                                           {/* Sub-Type Actions */}
                                           <td className="px-4 py-3 text-right">
                                             <div className="flex items-center justify-end gap-1.5">
-                                              <button
-                                                type="button"
-                                                onClick={() => openEditSubTypeModal(type, sub)}
-                                                disabled={!hasPermission('masters.particulars.write')}
-                                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : 'Edit Sub-Type'}
-                                              >
-                                                <Pencil className="w-3.5 h-3.5" />
-                                                <span>Edit</span>
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => promptDeleteSubType(type, sub)}
-                                                disabled={!hasPermission('masters.particulars.delete')}
-                                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                                title={!hasPermission('masters.particulars.delete') ? 'Requires masters.particulars.delete permission' : 'Delete Sub-Type'}
-                                              >
-                                                <Trash2 className="w-3.5 h-3.5" />
-                                                <span>Delete</span>
-                                              </button>
+                                              {hasPermission('masters.particulars.write') && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => openEditSubTypeModal(type, sub)}
+                                                  className="btn-act"
+                                                  title={'Edit Sub-Type'}
+                                                >
+                                                  <Pencil className="w-3.5 h-3.5" />
+                                                  <span>Edit</span>
+                                                </button>
+                                              )}
+                                              {hasPermission('masters.particulars.delete') && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => promptDeleteSubType(type, sub)}
+                                                  className="btn-act btn-act-danger"
+                                                  title={'Delete Sub-Type'}
+                                                >
+                                                  <Trash2 className="w-3.5 h-3.5" />
+                                                  <span>Delete</span>
+                                                </button>
+                                              )}
                                             </div>
                                           </td>
                                         </tr>
@@ -762,7 +841,7 @@ export default function ReceiptTypeManagement() {
                 })
               ) : (
                 <tr>
-                  <td colSpan="5" className="px-6 py-12 text-center text-[#863221]">
+                  <td colSpan="4" className="px-6 py-12 text-center text-[#863221]">
                     <div className="w-12 h-12 rounded-full bg-[#FAF7F2] text-[#863221]/60 flex items-center justify-center mx-auto mb-3">
                       <FileText className="w-6 h-6" />
                     </div>
@@ -781,14 +860,15 @@ export default function ReceiptTypeManagement() {
                           Clear Filters
                         </button>
                       ) : (
-                        <button
-                          onClick={openAddTypeModal}
-                          disabled={!hasPermission('masters.particulars.write')}
-                          title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : undefined}
-                          className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                        >
-                          Add Particular
-                        </button>
+                        hasPermission('masters.particulars.write') && (
+                          <button
+                            onClick={openAddTypeModal}
+
+                            className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                          >
+                            Add Particular
+                          </button>
+                        )
                       )}
                     </div>
                   </td>
@@ -799,7 +879,7 @@ export default function ReceiptTypeManagement() {
         </div>
 
         {/* Pagination Section */}
-        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3 text-xs text-[#863221] font-medium">
             <span>
               Showing {filteredData.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} to{' '}
@@ -870,7 +950,7 @@ export default function ReceiptTypeManagement() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <FileText className="w-5 h-5" />
@@ -915,6 +995,55 @@ export default function ReceiptTypeManagement() {
               )}
             </div>
 
+            {/* Service (optional) */}
+            <div>
+              <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
+                Service
+              </label>
+              <select
+                name="serviceTypeId"
+                value={typeFormData.serviceTypeId}
+                onChange={handleTypeFormChange}
+                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] rounded-xl text-sm font-medium text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601]"
+              >
+                <option value="">No service</option>
+                {serviceTypes.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name_en}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-[#863221]/70 mt-1">
+                Optional. Ties this particular to a service (Temple, Mangalya, Hall...) so it is counted on the member profile under Services.
+              </p>
+            </div>
+
+            {/* What this particular means (set on the main particular; its sub types follow it) */}
+            <div className="space-y-2.5 rounded-xl border border-[#E8DFD8] bg-[#FAF7F2]/60 p-3.5">
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(typeFormData.paysForMembership)}
+                  onChange={(e) => setTypeFormData((prev) => ({ ...prev, paysForMembership: e.target.checked }))}
+                  className="mt-0.5 w-4 h-4 accent-[#510601] cursor-pointer"
+                />
+                <span>
+                  <span className="block text-xs font-bold text-[#180200]">Pays for membership</span>
+                  <span className="block text-[11px] text-[#863221]/80">The money paid on this particular (and its sub types) counts toward a member's membership credit and type.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(typeFormData.needsDescription)}
+                  onChange={(e) => setTypeFormData((prev) => ({ ...prev, needsDescription: e.target.checked }))}
+                  className="mt-0.5 w-4 h-4 accent-[#510601] cursor-pointer"
+                />
+                <span>
+                  <span className="block text-xs font-bold text-[#180200]">Needs a description</span>
+                  <span className="block text-[11px] text-[#863221]/80">Receipt Entry asks what the money is for (a sub type, when this particular has sub types, counts as that description).</span>
+                </span>
+              </label>
+            </div>
+
             {/* Status Radio */}
             <div>
               <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
@@ -956,22 +1085,7 @@ export default function ReceiptTypeManagement() {
             </div>
 
             {/* Modal Actions */}
-            <div className="pt-3 flex items-center justify-end gap-3 border-t border-[#E8DFD8]">
-              <button
-                type="button"
-                onClick={() => setIsTypeModalOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-bold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-1.5"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>{typeModalMode === 'add' ? 'Create Particular' : 'Save Changes'}</span>
-              </button>
-            </div>
+            <ModalFooter kind={typeModalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsTypeModalOpen(false)} inForm />
 
           </form>
         </div>
@@ -989,7 +1103,7 @@ export default function ReceiptTypeManagement() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Layers className="w-5 h-5" />
@@ -1075,22 +1189,7 @@ export default function ReceiptTypeManagement() {
             </div>
 
             {/* Modal Actions */}
-            <div className="pt-3 flex items-center justify-end gap-3 border-t border-[#E8DFD8]">
-              <button
-                type="button"
-                onClick={() => setIsSubTypeModalOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-bold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-1.5"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>{subTypeModalMode === 'add' ? 'Add Sub-Type' : 'Save Changes'}</span>
-              </button>
-            </div>
+            <ModalFooter kind={subTypeModalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsSubTypeModalOpen(false)} inForm />
 
           </form>
         </div>
@@ -1099,57 +1198,39 @@ export default function ReceiptTypeManagement() {
       
 
       {/* ============================================================ */}
-      {/* STATUS TOGGLE CONFIRMATION DIALOG                            */}
+      {/* DELETE CONFIRMATION DIALOG                                   */}
       {/* ============================================================ */}
       <Modal
-        isOpen={Boolean(statusDialog)}
-        onClose={() => setStatusDialog(null)}
+        isOpen={Boolean(deletingItem)}
+        onClose={() => setDeletingItem(null)}
       >
-        {statusDialog && (
+        {deletingItem && (
           <div
-            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
+            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center overflow-hidden animate-in zoom-in-95 duration-200"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3.5 ${statusDialog.newStatus === 'Inactive' ? 'bg-red-100 text-[#ED4636]' : 'bg-[#3D705C]/10 text-[#3D705C]'
-              }`}>
-              {statusDialog.newStatus === 'Inactive' ? (
-                <AlertTriangle className="w-7 h-7" />
-              ) : (
-                <CheckCircle2 className="w-7 h-7" />
-              )}
+            <div className="w-14 h-14 rounded-full bg-red-100 text-[#ED4636] flex items-center justify-center mx-auto mb-3.5">
+              <AlertTriangle className="w-7 h-7" />
             </div>
 
             <h3 className="text-base font-bold text-[#180200]">
-              {statusDialog.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} {statusDialog.targetType === 'receiptType' ? 'Particular' : 'Sub-Type'}?
+              Delete {deletingItem.targetType === 'subType' ? 'Sub-Type' : 'Particular'}?
             </h3>
             <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-              Are you sure you want to mark <strong className="text-[#180200]">{statusDialog.item.name}</strong> as <span className="font-bold">{statusDialog.newStatus}</span>?
-              {statusDialog.newStatus === 'Inactive'
-                ? ' Inactive particulars will no longer appear when creating new receipts, but historical receipts are preserved.'
-                : ' Active particulars will be immediately available in the Receipt Entry form.'}
+              Are you sure you want to delete <strong className="text-[#180200]">{deletingItem.item.name}</strong>?
+              {deletingItem.targetType === 'receiptType' && deletingItem.item.subTypes?.length > 0
+                ? ` Its ${deletingItem.item.subTypes.length} sub-type(s) will be deleted too.`
+                : ' Historical receipts are preserved.'}
             </p>
 
-            <div className="mt-5 flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setStatusDialog(null)}
-                className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.particulars.write')}
-                title={!hasPermission('masters.particulars.write') ? 'Requires masters.particulars.write permission' : undefined}
-                onClick={handleConfirmStatusToggle}
-                className={`w-full py-2.5 px-4 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer ${statusDialog.newStatus === 'Inactive'
-                  ? 'bg-[#ED4636] hover:bg-[#C93324]'
-                  : 'bg-[#3D705C] hover:bg-[#2F5647]'
-                  }`}
-              >
-                {statusDialog.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'}
-              </button>
-            </div>
+            <ModalFooter
+              kind="delete"
+              onCancel={() => setDeletingItem(null)}
+              onSubmit={handleConfirmDelete}
+              disabled={!hasPermission('masters.particulars.delete')}
+              title={!hasPermission('masters.particulars.delete') ? 'Requires masters.particulars.delete permission' : undefined}
+              inForm
+            />
           </div>
         )}
       </Modal>

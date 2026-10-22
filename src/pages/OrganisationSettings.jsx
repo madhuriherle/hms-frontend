@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link } from 'react-router-dom';
 import api from '../api';
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
@@ -14,7 +13,6 @@ import {
   CheckCircle2,
   AlertCircle,
   X,
-  ChevronRight,
   Upload,
   Image as ImageIcon,
   Trash2,
@@ -27,19 +25,15 @@ import {
   FileText,
   ShieldCheck,
   Eye,
-  Info,
-  Layers,
-  Sparkles
 } from 'lucide-react';
-import {
-  ORGANISATION_TYPES,
-  EMPTY_ORGANISATION_SETTINGS,
-  settingsFromApi,
-  settingsToApi
-} from '../utils/organisationStore';
-import { loadLocations, findLocationByPin } from '../utils/serverData';
+import { EMPTY_ORGANISATION_SETTINGS, settingsFromApi, settingsToApi } from '../utils/organisationStore';
+import { lookupPin } from '../utils/serverData';
+import useRules, { hasDigits, matchesPattern, mobileProblem } from '../hooks/useRules';
+import { useList } from '../hooks/useLists';
 
 export default function OrganisationSettings() {
+  const rules = useRules(); // formats and limits from the server
+  const organisationTypes = useList('organisation_types'); // from the server (GET /meta/lists)
   const { hasPermission } = useAuth();
 
   // Tab state: 'profile' | 'print' | 'notifications' | 'contact'
@@ -118,9 +112,8 @@ export default function OrganisationSettings() {
 
     // Auto-fill state / district on 6-digit PIN code lookup
     if (name === 'postalCode' && value.length === 6 && /^\d{6}$/.test(value)) {
-      loadLocations()
-        .then((loc) => {
-          const match = findLocationByPin(loc.postalCodes, value);
+      lookupPin(value)
+        .then((match) => {
           if (!match.found) return;
           setSettings((prev) => ({
             ...prev,
@@ -229,16 +222,16 @@ export default function OrganisationSettings() {
       errs['profile_organisationName'] = 'Organisation Name is mandatory.';
     }
 
-    if (settings.profile.email?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.profile.email.trim())) {
+    if (settings.profile.email?.trim() && !matchesPattern(settings.profile.email.trim(), rules?.email?.pattern)) {
       errs['profile_email'] = 'Please enter a valid email address.';
     }
 
-    if (settings.profile.mobile?.trim() && !/^\d{10}$/.test(settings.profile.mobile.trim())) {
-      errs['profile_mobile'] = 'Mobile number must be a 10-digit number.';
+    if (settings.profile.mobile?.trim() && mobileProblem(rules, settings.profile.mobile.trim())) {
+      errs['profile_mobile'] = mobileProblem(rules, settings.profile.mobile.trim());
     }
 
-    if (settings.profile.postalCode?.trim() && !/^\d{6}$/.test(settings.profile.postalCode.trim())) {
-      errs['profile_postalCode'] = 'PIN Code must be 6 numeric digits.';
+    if (settings.profile.postalCode?.trim() && !hasDigits(settings.profile.postalCode.trim(), rules?.pincode?.digits)) {
+      errs['profile_postalCode'] = `PIN Code must be ${rules?.pincode?.digits} numeric digits.`;
     }
 
     // 2. Contact Validation
@@ -248,17 +241,17 @@ export default function OrganisationSettings() {
 
     if (!settings.contact.contactNumber?.trim()) {
       errs['contact_contactNumber'] = 'Contact Number is mandatory.';
-    } else if (!/^\d{10}$/.test(settings.contact.contactNumber.trim())) {
-      errs['contact_contactNumber'] = 'Contact Number must be a valid 10-digit mobile number.';
+    } else if (mobileProblem(rules, settings.contact.contactNumber.trim())) {
+      errs['contact_contactNumber'] = mobileProblem(rules, settings.contact.contactNumber.trim());
     }
 
     if (!settings.contact.email?.trim()) {
       errs['contact_email'] = 'Primary Contact Email is mandatory.';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.contact.email.trim())) {
+    } else if (!matchesPattern(settings.contact.email.trim(), rules?.email?.pattern)) {
       errs['contact_email'] = 'Please enter a valid email address.';
     }
 
-    if (settings.contact.alternateEmail?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.contact.alternateEmail.trim())) {
+    if (settings.contact.alternateEmail?.trim() && !matchesPattern(settings.contact.alternateEmail.trim(), rules?.email?.pattern)) {
       errs['contact_alternateEmail'] = 'Please enter a valid alternate email address.';
     }
 
@@ -327,7 +320,7 @@ export default function OrganisationSettings() {
   };
 
   return (
-    <PermissionGate required="system.read">
+    <PermissionGate required="masters.organisation.read">
     <div className="space-y-6 pb-20 font-sans">
       {/* ---------------------------------------------------- */}
       {/* Toast Notification Alert                            */}
@@ -355,42 +348,32 @@ export default function OrganisationSettings() {
       )}
 
       {/* ---------------------------------------------------- */}
-      {/* BREADCRUMB & HEADER                                  */}
-      {/* ---------------------------------------------------- */}
-      <div>
-<div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">
-              Organisation Settings
-            </h1>
-          </div>
+      {/* Action Bar */}
+      <div className="flex items-center justify-end gap-3 -mb-2">
+        <button
+          type="button"
+          onClick={handleReset}
+          className="px-4 py-2.5 rounded-xl border border-[#E8DFD8] hover:border-[#863221] bg-white text-[#863221] hover:text-[#510601] text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm hover:bg-[#FAF7F2] cursor-pointer"
+          title="Revert modifications to previously saved values"
+        >
+          <RotateCcw className="w-4 h-4" />
+          <span>Reset</span>
+        </button>
 
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleReset}
-              className="px-4 py-2.5 rounded-xl border border-[#E8DFD8] hover:border-[#863221] bg-white text-[#863221] hover:text-[#510601] text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm hover:bg-[#FAF7F2] cursor-pointer"
-              title="Revert modifications to previously saved values"
-            >
-              <RotateCcw className="w-4 h-4" />
-              <span>Reset</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={!hasPermission('system.write')}
-              title={!hasPermission('system.write') ? 'You need the system.write permission' : 'Save Changes'}
-              className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm hover:shadow-md transition-all flex items-center gap-2 cursor-pointer"
-            >
-              <Save className="w-4 h-4" />
-              <span>Save Changes</span>
-              {isDirty && (
-                <span className="w-2 h-2 rounded-full bg-[#FFC107] animate-pulse" title="Unsaved changes" />
-              )}
-            </button>
-          </div>
-        </div>
+        {hasPermission('masters.organisation.write') && (
+          <button
+            type="button"
+            onClick={handleSave}
+            title={'Save Changes'}
+            className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm hover:shadow-md transition-all flex items-center gap-2 cursor-pointer"
+          >
+            <Save className="w-4 h-4" />
+            <span>Save Changes</span>
+            {isDirty && (
+              <span className="w-2 h-2 rounded-full bg-[#FFC107] animate-pulse" title="Unsaved changes" />
+            )}
+          </button>
+        )}
       </div>
 
       {/* ---------------------------------------------------- */}
@@ -484,9 +467,6 @@ export default function OrganisationSettings() {
                   <h3 className="text-sm font-bold text-[#180200]">
                     Organisation Logo
                   </h3>
-                  <p className="text-xs text-[#863221] mt-0.5">
-                    This logo appears on printed receipts, identity cards, label headers, and exported reports.
-                  </p>
                   <p className="text-[11px] text-[#863221]/70 mt-1">
                     Recommended: Transparent PNG or SVG with aspect ratio 1:1 or 4:3 (Max file size: 2MB).
                   </p>
@@ -500,26 +480,29 @@ export default function OrganisationSettings() {
                     onChange={handleLogoUpload}
                     className="hidden"
                   />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={!hasPermission('system.write')}
-                    title={!hasPermission('system.write') ? 'You need the system.write permission' : settings.profile.logo ? 'Change Logo' : 'Upload Logo'}
-                    className="px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-bold rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>{settings.profile.logo ? 'Change Logo' : 'Upload Logo'}</span>
-                  </button>
-
-                  {settings.profile.logo && (
+                  {hasPermission('masters.organisation.write') && (
                     <button
                       type="button"
-                      onClick={handleRemoveLogo}
-                      className="px-3.5 py-2 bg-white hover:bg-red-50 text-[#ED4636] border border-[#E8DFD8] hover:border-red-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                      onClick={() => fileInputRef.current?.click()}
+                      title={!hasPermission('masters.organisation.write') ? 'You need the masters.organisation.write permission' : settings.profile.logo ? 'Change Logo' : 'Upload Logo'}
+                      className="px-3.5 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-bold rounded-xl shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Remove</span>
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{settings.profile.logo ? 'Change Logo' : 'Upload Logo'}</span>
                     </button>
+                  )}
+
+                  {settings.profile.logo && (
+                    hasPermission('masters.organisation.write') && (
+                      <button
+                        type="button"
+                        onClick={handleRemoveLogo}
+                        className="px-3.5 py-2 bg-white hover:bg-red-50 text-[#ED4636] border border-[#E8DFD8] hover:border-red-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Remove</span>
+                      </button>
+                    )
                   )}
                 </div>
               </div>
@@ -600,9 +583,9 @@ export default function OrganisationSettings() {
                   onChange={handleProfileChange}
                   className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601] rounded-xl text-sm font-medium text-[#180200] focus:outline-none cursor-pointer"
                 >
-                  {ORGANISATION_TYPES.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
+                  {organisationTypes.map((o) => (
+                    <option key={o.code} value={o.code}>
+                      {o.label}
                     </option>
                   ))}
                 </select>
@@ -1290,9 +1273,6 @@ export default function OrganisationSettings() {
               <h3 className="text-xs sm:text-sm font-bold text-[#180200]">
                 Display Contact Information
               </h3>
-              <p className="text-[11px] sm:text-xs text-[#863221] mt-0.5">
-                Enable this to display designated contact and helpdesk details on member portals and official receipts.
-              </p>
             </div>
             <label className="relative inline-flex items-center cursor-pointer shrink-0">
               <input
@@ -1574,16 +1554,17 @@ export default function OrganisationSettings() {
             <span>Reset Form</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={!hasPermission('system.write')}
-            title={!hasPermission('system.write') ? 'You need the system.write permission' : 'Save Changes'}
-            className="flex-1 sm:flex-none px-6 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <Save className="w-4 h-4" />
-            <span>Save Changes</span>
-          </button>
+          {hasPermission('masters.organisation.write') && (
+            <button
+              type="button"
+              onClick={handleSave}
+              title={'Save Changes'}
+              className="flex-1 sm:flex-none px-6 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Save className="w-4 h-4" />
+              <span>Save Changes</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

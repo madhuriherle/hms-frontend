@@ -1,5 +1,6 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import useSort from '../hooks/useSort';
+import SortTh from '../components/SortTh';
 import Modal from '../components/Modal';
 import SearchFilterBar from '../components/SearchFilterBar';
 import FilterSelect from '../components/FilterSelect';
@@ -10,14 +11,11 @@ import {
   Pencil,
   Trash2,
   Eye,
-  Power,
   ChevronRight,
   ChevronLeft,
   CheckCircle2,
   X,
   AlertCircle,
-  AlertTriangle,
-  RefreshCw,
   Mail,
   Phone,
   Shield,
@@ -25,63 +23,83 @@ import {
   Lock,
   EyeOff,
   User,
-  Calendar,
-  Clock,
   Check,
-  Layers,
-  FileText
 } from 'lucide-react';
 import api from '../api';
 import { formatDate, formatDateTime } from '../utils/dateUtils';
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
+import useRules, { matchesPattern, mobileProblem, passwordProblem } from '../hooks/useRules';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
 
+import ModalFooter from '../components/ModalFooter';
 export default function UserManagement() {
   const { myRank, hasPermission } = useAuth();
-  // Only roles strictly weaker (higher rank number) than mine can be assigned — mirrors the backend rule.
-  const availableRoles = roles => roles.filter(r => (r.rank_level ?? 99) > myRank);
+  const rules = useRules(); // formats and limits from the server
+  // Roles weaker than mine, or my own rank can be assigned — mirrors the backend rule.
+  const sameRankOk = (rank) => rank >= myRank;
+  const availableRoles = roles => roles.filter(r => r.code !== 'MEMBER' && r.name?.toLowerCase() !== 'member' && sameRankOk(r.rank_level ?? 99));
   const getUserRank = (user) => {
     const direct = user?.role_rank_level;
     if (direct != null) return Number(direct);
     const roleObj = roles.find(r => r.id === (user?.role_id ?? user?.roleId) || String(r.id) === String(user?.role_id ?? user?.roleId));
     return roleObj?.rank_level ?? null;
   };
-  // A user at or above my rank is protected: never editable/deletable from this screen.
+  // A user stronger than me is protected: never editable/deletable from this screen.
   const canManageUser = (user) => {
     const r = getUserRank(user);
-    return r == null || r > myRank;
+    return r == null || sameRankOk(r);
   };
   // Master state
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
-  const [allPrivileges, setAllPrivileges] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [allPrivileges] = useState([]);
+  const [, setLoading] = useState(true);
+
+  const { sort, toggle: toggleSort, params: sortParams } = useSort();
+  const firstLoad = useRef(true);
+  const readUsers = async () => {
+    const usersResponse = await api.get('/users/', { params: { limit: 200, ...sortParams } });
+    const rawUserRows = Array.isArray(usersResponse.data)
+      ? usersResponse.data
+      : (usersResponse.data?.data || usersResponse.data?.items || []);
+    return rawUserRows.filter(
+      (u) => u.user_type !== 'MEMBER' && !u.member_id && u.role_name !== 'Member'
+    );
+  };
 
   // --- Fetch API Data on Mount ---
   useEffect(() => {
     const fetchMasterData = async () => {
       try {
         setLoading(true);
-        const usersResponse = await api.get('/users/', { params: { limit: 500 } });
-        const userRows = Array.isArray(usersResponse.data)
-          ? usersResponse.data
-          : (usersResponse.data?.data || usersResponse.data?.items || []);
-        setUsers(userRows);
+        setUsers(await readUsers());
 
-        const rolesResponse = await api.get('/users/roles', { params: { limit: 500 } });
-        const roleRows = Array.isArray(rolesResponse.data)
+        const rolesResponse = await api.get('/users/roles', { params: { limit: 200, assignable: true } });
+        const rawRoleRows = Array.isArray(rolesResponse.data)
           ? rolesResponse.data
           : (rolesResponse.data?.data || rolesResponse.data?.items || []);
+        const roleRows = rawRoleRows.filter(
+          (r) => r.code !== 'MEMBER' && r.name?.toLowerCase() !== 'member'
+        );
         setRoles(roleRows);
       } catch (error) {
-        console.error("API Fetch Error:", error);
+        console.error("API Fetch Error:", error); showToast(error.response?.data?.detail || 'Could not load data from the server.', 'error');
       } finally {
         setLoading(false);
       }
     };
     fetchMasterData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // the users are read again when the sort changes (the default is newest first)
+  useEffect(() => {
+    if (firstLoad.current) { firstLoad.current = false; return; }
+    readUsers().then(setUsers).catch((error) => showToast(error.response?.data?.detail || 'Could not load the users.', 'error'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sort.by, sort.dir]);
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -144,13 +162,6 @@ export default function UserManagement() {
   // ----------------------------------------------------
   // SUMMARY METRICS
   // ----------------------------------------------------
-  const summaryStats = useMemo(() => {
-    const total = users.length;
-    const active = users.filter(u => isUserActive(u)).length;
-    const inactive = users.filter(u => !isUserActive(u)).length;
-    const uniqueRolesCount = new Set(users.map(u => u.role_id ?? u.roleId)).size;
-    return { total, active, inactive, uniqueRolesCount };
-  }, [users]);
 
   // ----------------------------------------------------
   // SEARCH & FILTERING
@@ -225,7 +236,7 @@ export default function UserManagement() {
 
   const openEditModal = (user) => {
     if (!canManageUser(user)) {
-      showToast('This user is at or above your rank and cannot be edited.', 'error');
+      showToast('You cannot edit this user.', 'error');
       return;
     }
     setModalMode('edit');
@@ -234,8 +245,8 @@ export default function UserManagement() {
     setFormData({
       fullName: user.name || user.fullName || '',
       username: user.username,
-      email: user.email,
-      mobile: user.mobile,
+      email: user.email || '',
+      mobile: user.mobile || '',
       password: '',
       confirmPassword: '',
       roleId: userRoleId ? Number(userRoleId) : '',
@@ -250,7 +261,7 @@ export default function UserManagement() {
   const handleFormChange = (e) => {
     const { name, value } = e.target;
     if (name === 'mobile') {
-      const cleaned = value.replace(/\D/g, '').slice(0, 10);
+      const cleaned = value.replace(/\D/g, '').slice(0, rules?.mobile?.max_digits ?? 15);
       setFormData(prev => ({ ...prev, mobile: cleaned }));
     } else if (name === 'username') {
       const cleaned = value.replace(/[^a-zA-Z0-9._]/g, '').toLowerCase();
@@ -283,8 +294,10 @@ export default function UserManagement() {
 
     if (!username) {
       errors.username = 'Username is required';
-    } else if (username.length < 3) {
-      errors.username = 'Username must be at least 3 characters';
+    } else if (rules && username.length < rules.username.min_length) {
+      errors.username = `Username must be at least ${rules.username.min_length} characters`;
+    } else if (rules && !matchesPattern(username, rules.username.pattern)) {
+      errors.username = 'Username can only contain letters, numbers, dots and underscores';
     } else {
       const isDuplicateUsername = users.some(
         u => (u.id !== editingUser?.id && String(u.id) !== String(editingUser?.id)) &&
@@ -295,24 +308,21 @@ export default function UserManagement() {
       }
     }
 
-    if (!email) {
-      errors.email = 'Email Address is required';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // email and mobile are optional; when given they must be valid and not already used
+    if (email && !matchesPattern(email, rules?.email?.pattern)) {
       errors.email = 'Please enter a valid email address';
-    } else {
+    } else if (email) {
       const isDuplicateEmail = users.some(
         u => (u.id !== editingUser?.id && String(u.id) !== String(editingUser?.id)) &&
-          u.email.toLowerCase() === email.toLowerCase()
+          (u.email || '').toLowerCase() === email.toLowerCase()
       );
       if (isDuplicateEmail) {
         errors.email = 'A user with this email address already exists.';
       }
     }
 
-    if (!mobile) {
-      errors.mobile = 'Mobile Number is required';
-    } else if (!/^[6-9]\d{9}$/.test(mobile)) {
-      errors.mobile = 'Please enter a valid 10-digit Indian mobile number';
+    if (mobile && mobileProblem(rules, mobile)) {
+      errors.mobile = mobileProblem(rules, mobile);
     }
 
     if (formData.roleId === '' || formData.roleId === undefined || formData.roleId === null) {
@@ -322,8 +332,8 @@ export default function UserManagement() {
     if (modalMode === 'add') {
       if (!formData.password) {
         errors.password = 'Password is required';
-      } else if (formData.password.length < 6) {
-        errors.password = 'Password must be at least 6 characters';
+      } else if (passwordProblem(rules, formData.password)) {
+        errors.password = passwordProblem(rules, formData.password);
       }
 
       if (!formData.confirmPassword) {
@@ -334,8 +344,8 @@ export default function UserManagement() {
     } else {
       // Edit mode: password is optional (only validated if entered)
       if (formData.password) {
-        if (formData.password.length < 6) {
-          errors.password = 'Password must be at least 6 characters';
+        if (passwordProblem(rules, formData.password)) {
+          errors.password = passwordProblem(rules, formData.password);
         }
         if (formData.password !== formData.confirmPassword) {
           errors.confirmPassword = 'Passwords do not match';
@@ -355,8 +365,8 @@ export default function UserManagement() {
       const payload = {
         name: formData.fullName.trim(),
         username: formData.username.trim(),
-        email: formData.email.trim(),
-        mobile: formData.mobile.trim(),
+        email: formData.email.trim() || null,
+        mobile: formData.mobile.trim() || null,
         mobile_country_code: '+91',
         role_id: Number(formData.roleId),
         status: typeof formData.status === 'boolean' ? formData.status : (formData.status === 'Active' || formData.status === 'true')
@@ -383,11 +393,11 @@ export default function UserManagement() {
 
   const promptToggleStatus = (user) => {
     if (user.isCurrentAdmin || user.username === 'admin' || user.id === 1) {
-      showToast('Super Administrator account cannot be deactivated.', 'error');
+      showToast('This account cannot be deactivated.', 'error');
       return;
     }
     if (!canManageUser(user)) {
-      showToast('This user is at or above your rank and cannot be changed.', 'error');
+      showToast('You cannot change this user.', 'error');
       return;
     }
     const active = isUserActive(user);
@@ -425,7 +435,7 @@ export default function UserManagement() {
     if (!deleteTargetUser) return;
     if (deleteTargetUser.isCurrentAdmin || deleteTargetUser.username === 'admin') return;
     if (!canManageUser(deleteTargetUser)) {
-      showToast('This user is at or above your rank and cannot be deleted.', 'error');
+      showToast('You cannot delete this user.', 'error');
       setDeleteTargetUser(null);
       return;
     }
@@ -445,6 +455,50 @@ export default function UserManagement() {
     }
     setDeleteTargetUser(null);
   };
+
+  useSwalConfirm(
+    deleteTargetUser,
+    () => setDeleteTargetUser(null),
+    (d) => {
+      const name = d.name || d.fullName;
+      if (d.isCurrentAdmin || d.username === 'admin') {
+        return {
+          title: 'Cannot delete user',
+          text: `${name} is the active main account and cannot be deleted.`,
+          confirmText: 'OK',
+          info: true,
+        };
+      }
+      return {
+        title: 'Delete user?',
+        text: `Are you sure you want to delete user ${name} (${d.username})? This action cannot be undone.`,
+        confirmText: 'Yes, delete',
+        danger: true,
+      };
+    },
+    async () => {
+      const d = deleteTargetUser;
+      if (d.isCurrentAdmin || d.username === 'admin') return;
+      await confirmDeleteUser();
+    }
+  );
+
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => {
+      const name = d.user?.name || d.user?.fullName || d.user?.username;
+      return {
+        title: `${d.newStatus === 'Inactive' ? 'Deactivate' : 'Activate'} user?`,
+        text: d.newStatus === 'Inactive'
+          ? `Deactivate ${name}? Deactivated users will not be able to log in.`
+          : `Activate ${name}? The user will be permitted to log in.`,
+        confirmText: d.newStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+        danger: d.newStatus === 'Inactive',
+      };
+    },
+    handleConfirmStatusToggle
+  );
 
   return (
     <PermissionGate required="users.management.read">
@@ -491,8 +545,7 @@ export default function UserManagement() {
 
       {/* Header, Search & Filters */}
       <SearchFilterBar
-        
-        title={<h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">User Management</h1>}
+        title="User Management"
         searchQuery={searchQuery}
         onSearchChange={(val) => {
           setSearchQuery(val);
@@ -504,15 +557,16 @@ export default function UserManagement() {
         }
         onResetFilters={handleClearFilters}
         rightSlot={
-          <button
-            onClick={openAddModal}
-            disabled={!hasPermission('users.management.write')}
-            title={!hasPermission('users.management.write') ? 'You need the users.management.write permission' : 'Add User'}
-            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-2xs hover:shadow transition-all cursor-pointer shrink-0"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>Add User</span>
-          </button>
+          hasPermission('users.management.write') && (
+            <button
+              onClick={openAddModal}
+              title={'Add User'}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs sm:text-sm font-semibold rounded-xl shadow-2xs hover:shadow transition-all cursor-pointer shrink-0"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>Add User</span>
+            </button>
+          )
         }
       >
         {/* Role Filter */}
@@ -526,7 +580,7 @@ export default function UserManagement() {
             { value: 'ALL', label: 'All Roles' },
             ...availableRoles(roles).map((r) => ({
               value: r.id,
-              label: r.rank_level != null ? `${r.name} (Rank ${r.rank_level})` : r.name
+              label: r.name
             }))
           ]}
           widthClass="w-full sm:w-48"
@@ -556,12 +610,12 @@ export default function UserManagement() {
           <table className="w-full text-left border-collapse min-w-[840px]">
             <thead>
               <tr className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-xs font-semibold text-[#863221] uppercase tracking-wider">
-                <th className="px-6 py-3.5">User Name</th>
+                <SortTh label="User" field="name" sort={sort} onSort={toggleSort} className="px-6 py-3.5" />
                 <th className="px-6 py-3.5">Email</th>
-                <th className="px-6 py-3.5">Mobile Number</th>
+                <th className="px-6 py-3.5">Mobile</th>
                 <th className="px-6 py-3.5">Role</th>
-                <th className="px-6 py-3.5">Status</th>
-                <th className="px-6 py-3.5">Last Login</th>
+                <SortTh label="Status" field="status" sort={sort} onSort={toggleSort} className="px-6 py-3.5" />
+                <th className="px-6 py-3.5">Last Seen</th>
                 <th className="px-6 py-3.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -571,15 +625,9 @@ export default function UserManagement() {
                   const userRoleId = user.role_id ?? user.roleId;
                   const roleObj = getRoleById(userRoleId);
                   const displayName = user.name || user.fullName || '';
-                  const initials = displayName
-                    .split(' ')
-                    .map(n => n[0])
-                    .join('')
-                    .toUpperCase()
-                    .slice(0, 2) || 'U';
                   const isActive = isUserActive(user);
                   const rowRank = user.role_rank_level ?? roleObj?.rank_level;
-                  const isRankLocked = rowRank != null && rowRank <= myRank;
+                  const isRankLocked = rowRank != null && !sameRankOk(rowRank);
                   const isRowLocked = (user.isCurrentAdmin || user.username === 'admin' || user.id === 1) || isRankLocked;
 
                   return (
@@ -587,19 +635,16 @@ export default function UserManagement() {
                       {/* User Name & Avatar */}
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-[#510601]/10 text-[#510601] border border-[#510601]/20 flex items-center justify-center text-xs font-bold shrink-0">
-                            {initials}
-                          </div>
                           <div>
                             <p className="font-bold text-[#180200] leading-tight flex items-center gap-1.5">
                               <span>{displayName}</span>
                               {user.isCurrentAdmin && (
-                                <span className="px-1.5 py-0.5 bg-[#FFC107]/20 border border-[#FFC107]/40 text-[#863221] text-[9px] font-bold rounded">
+                                <span className="text-[10px] font-semibold text-[#863221]/70">
                                   You
                                 </span>
                               )}
                             </p>
-                            <span className="text-[11px] text-[#863221]/60 font-mono">ID #{user.id}</span>
+                            <span className="text-[11px] text-[#863221]/60 font-mono">ID {user.id}</span>
                           </div>
                         </div>
                       </td>
@@ -611,26 +656,12 @@ export default function UserManagement() {
 
                       {/* Mobile */}
                       <td className="px-6 py-4 font-mono text-xs text-[#180200]/90">
-                        {user.mobile_country_code || '+91'} {user.mobile}
+                        {user.mobile ? `${user.mobile_country_code || '+91'} ${user.mobile}` : '—'}
                       </td>
 
                       {/* Role */}
                       <td className="px-6 py-4">
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#510601]/5 text-[#510601] border border-[#510601]/20 rounded-lg text-xs font-semibold">
-                          <Shield className="w-3 h-3 text-[#863221]" />
-                          {roleObj ? roleObj.name : 'Unassigned'}
-                        </span>
-                        {rowRank != null && (
-                          <span
-                            className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 text-[9px] font-bold rounded border ${rowRank === 1
-                              ? 'bg-[#FFC107]/15 border-[#FFC107]/40 text-[#863221]'
-                              : 'bg-[#FAF7F2] border-[#E8DFD8] text-[#863221]'
-                            }`}
-                            title={`Role rank ${rowRank} (1 = highest authority)`}
-                          >
-                            R{rowRank}
-                          </span>
-                        )}
+                        <span className="text-xs font-semibold text-[#510601]">{roleObj ? roleObj.name : (user.role_name || 'Unassigned')}</span>
                       </td>
 
                       {/* Status */}
@@ -639,66 +670,65 @@ export default function UserManagement() {
                           type="button"
                           disabled={isRowLocked || !hasPermission('users.management.write')}
                           onClick={() => !isRowLocked && promptToggleStatus(user)}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold transition-all ${isRowLocked
-                              ? 'bg-[#3D705C]/10 text-[#3D705C] border border-[#3D705C]/20 cursor-not-allowed opacity-80'
+                          className={`text-xs font-semibold ${isRowLocked
+                              ? 'text-[#3D705C] cursor-not-allowed opacity-80'
                               : isActive
-                                ? 'bg-[#3D705C]/10 text-[#3D705C] border border-[#3D705C]/20 hover:bg-[#3D705C]/20 cursor-pointer hover:opacity-80 active:scale-95'
-                                : 'bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 cursor-pointer hover:opacity-80 active:scale-95'
+                                ? 'chip chip-on cursor-pointer'
+                                : 'chip chip-off cursor-pointer'
                             }`}
                           title={
                             !hasPermission('users.management.write')
                               ? 'You need the users.management.write permission'
                               : user.isCurrentAdmin || user.username === 'admin' || user.id === 1
-                                ? 'Super Administrator account is permanently Active'
+                                ? 'This account is permanently Active'
                                 : isRankLocked
-                                  ? 'User is at or above your rank'
+                                  ? 'You cannot change this user'
                                   : (isActive ? 'Click to deactivate user' : 'Click to activate user')
                           }
                         >
-                          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                           {isActive ? 'Active' : 'Inactive'}
                         </button>
                       </td>
 
                       {/* Last Login */}
                       <td className="px-6 py-4 text-xs text-[#863221]/80 font-medium">
-                        {formatDateTime(user.lastLogin, 'Never', false)}
+                        {formatDateTime(user.last_login_at ?? user.lastLogin, 'Never', false)}
                       </td>
 
                       {/* Actions */}
                       <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-1">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
                           <button
                             onClick={() => setViewingUser(user)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-all cursor-pointer"
+                            className="btn-act"
                             title="View User Details"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>View</span>
                           </button>
-                          <button
-                            disabled={isRankLocked || !hasPermission('users.management.write')}
-                            onClick={() => !isRankLocked && openEditModal(user)}
-                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
-                              isRankLocked
-                                ? 'text-gray-300 border-transparent cursor-not-allowed opacity-40'
-                                : 'text-amber-700 bg-amber-50 hover:bg-amber-100 border-amber-200 cursor-pointer'
-                            }`}
-                            title={!hasPermission('users.management.write') ? 'You need the users.management.write permission' : isRankLocked ? 'User is at or above your rank' : 'Edit User'}
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            <span>Edit</span>
-                          </button>
-                          {!isRankLocked && !(user.isCurrentAdmin || user.username === 'admin' || user.id === 1) && (
+                          {hasPermission('users.management.write') && (
                             <button
-                              disabled={isRankLocked || !hasPermission('users.management.delete')}
-                              onClick={() => setDeleteTargetUser(user)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                              title={!hasPermission('users.management.delete') ? 'You need the users.management.delete permission' : 'Delete User'}
+                              disabled={isRankLocked}
+                              onClick={() => !isRankLocked && openEditModal(user)}
+                              className={`btn-act ${isRankLocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+                              title={!hasPermission('users.management.write') ? 'You need the users.management.write permission' : isRankLocked ? 'You cannot change this user' : 'Edit User'}
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete</span>
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span>Edit</span>
                             </button>
+                          )}
+                          {!isRankLocked && !(user.isCurrentAdmin || user.username === 'admin' || user.id === 1) && (
+                            hasPermission('users.management.delete') && (
+                              <button
+                                disabled={isRankLocked}
+                                onClick={() => setDeleteTargetUser(user)}
+                                className="btn-act btn-act-danger"
+                                title={'Delete User'}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete</span>
+                              </button>
+                            )
                           )}
                         </div>
                       </td>
@@ -728,14 +758,15 @@ export default function UserManagement() {
                           Clear Filters
                         </button>
                       ) : (
-                        <button
-                          onClick={openAddModal}
-                          disabled={!hasPermission('users.management.write')}
-                          title={!hasPermission('users.management.write') ? 'You need the users.management.write permission' : undefined}
-                          className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                        >
-                          Add User
-                        </button>
+                        hasPermission('users.management.write') && (
+                          <button
+                            onClick={openAddModal}
+
+                            className="px-4 py-2 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                          >
+                            Add User
+                          </button>
+                        )
                       )}
                     </div>
                   </td>
@@ -746,7 +777,7 @@ export default function UserManagement() {
         </div>
 
         {/* Pagination Section */}
-        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="px-4 sm:px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3 text-xs text-[#863221] font-medium">
             <span>
               Showing {filteredUsers.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} to{' '}
@@ -825,7 +856,7 @@ export default function UserManagement() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2] shrink-0">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <UserPlus className="w-5 h-5" />
@@ -908,7 +939,7 @@ export default function UserManagement() {
                 {/* Email */}
                 <div>
                   <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                    Email Address <span className="text-[#ED4636]">*</span>
+                    Email Address
                   </label>
                   <div className="relative">
                     <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#863221]/50" />
@@ -934,7 +965,7 @@ export default function UserManagement() {
                 {/* Mobile Number */}
                 <div>
                   <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
-                    Mobile Number <span className="text-[#ED4636]">*</span>
+                    Mobile Number
                   </label>
                   <div className="relative">
                     <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#863221]/50" />
@@ -1062,7 +1093,7 @@ export default function UserManagement() {
                     <option value="">-- Select Role --</option>
                     {availableRoles(roles).map(r => (
                       <option key={r.id} value={r.id}>
-                        {r.name}{r.rank_level != null ? ` (Rank ${r.rank_level})` : ''}
+                        {r.name}
                       </option>
                     ))}
                   </select>
@@ -1102,7 +1133,7 @@ export default function UserManagement() {
                       </span>
                     </div>
                     <span className="text-[11px] px-2 py-0.5 rounded-full font-bold bg-[#510601]/10 text-[#510601]">
-                      {selectedFormRole.privileges ? selectedFormRole.privileges.length : 0} Privileges Granted
+                      {selectedFormRole.is_all_access ? 'All privileges' : `${(selectedFormRole.permission_codes || selectedFormRole.privileges || []).length} Privileges Granted`}
                     </span>
                   </div>
 
@@ -1116,8 +1147,11 @@ export default function UserManagement() {
                       Module Coverage
                     </span>
                     <div className="flex flex-wrap gap-1.5">
-                      {allPrivileges.map(mod => {
-                        const rolePrivs = selectedFormRole.privileges || [];
+                      {selectedFormRole.is_all_access && (
+                        <span className="px-2 py-0.5 bg-white border border-[#E8DFD8] rounded-md text-[10px] font-medium text-[#180200]">Every module</span>
+                      )}
+                      {!selectedFormRole.is_all_access && allPrivileges.map(mod => {
+                        const rolePrivs = selectedFormRole.permission_codes || selectedFormRole.privileges || [];
                         const hasPrivs = mod.privileges.some(p =>
                           rolePrivs.includes(p.id)
                         );
@@ -1129,7 +1163,7 @@ export default function UserManagement() {
 
                         return (
                           <span
-                            key={mod.id}
+                            key={mod.module}
                             className="px-2 py-0.5 bg-white border border-[#E8DFD8] rounded-md text-[10px] font-medium text-[#180200] flex items-center gap-1"
                           >
                             <Check className="w-2.5 h-2.5 text-[#3D705C]" />
@@ -1145,21 +1179,7 @@ export default function UserManagement() {
             </div>
 
             {/* Actions */}
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsAddEditOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer"
-              >
-                {modalMode === 'add' ? 'Create User' : 'Save Changes'}
-              </button>
-            </div>
+            <ModalFooter kind={modalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsAddEditOpen(false)} inForm />
 
           </form>
         </div>
@@ -1178,7 +1198,7 @@ export default function UserManagement() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+            <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                   <User className="w-5 h-5" />
@@ -1214,7 +1234,6 @@ export default function UserManagement() {
                     ? 'bg-[#3D705C]/10 text-[#3D705C] border border-[#3D705C]/20'
                     : 'bg-gray-100 text-gray-600 border border-gray-200'
                   }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${isUserActive(viewingUser) ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                   {isUserActive(viewingUser) ? 'Active' : 'Inactive'}
                 </span>
               </div>
@@ -1223,44 +1242,46 @@ export default function UserManagement() {
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div>
                   <p className="text-[#863221] font-semibold uppercase">Email Address</p>
-                  <p className="text-[#180200] font-medium mt-0.5">{viewingUser.email}</p>
+                  <p className="text-[#180200] font-medium mt-0.5">{viewingUser.email || '—'}</p>
                 </div>
 
                 <div>
                   <p className="text-[#863221] font-semibold uppercase">Mobile Number</p>
                   <p className="text-[#180200] font-mono font-medium mt-0.5">
-                    {viewingUser.mobile_country_code || '+91'} {viewingUser.mobile}
+                    {viewingUser.mobile ? `${viewingUser.mobile_country_code || '+91'} ${viewingUser.mobile}` : '—'}
                   </p>
                 </div>
 
                 <div>
                   <p className="text-[#863221] font-semibold uppercase">Created Date</p>
-                  <p className="text-[#180200] font-medium mt-0.5">{formatDate(viewingUser.createdAt)}</p>
+                  <p className="text-[#180200] font-medium mt-0.5">{formatDate(viewingUser.created_at ?? viewingUser.createdAt)}</p>
                 </div>
 
                 <div>
                   <p className="text-[#863221] font-semibold uppercase">Last Login</p>
-                  <p className="text-[#180200] font-medium mt-0.5">{formatDateTime(viewingUser.lastLogin, 'Never', false)}</p>
+                  <p className="text-[#180200] font-medium mt-0.5">{formatDateTime(viewingUser.last_login_at ?? viewingUser.lastLogin, 'Never', false)}</p>
                 </div>
               </div>
 
               {/* Role & Access Info */}
               {(() => {
+                // the role list holds only roles you may assign, so the Super Admin's own role is not in it:
+                // fall back to what the user row says
                 const userRole = getRoleById(viewingUser.role_id ?? viewingUser.roleId);
+                const roleName = userRole?.name || viewingUser.role_name;
+                const roleRank = userRole?.rank_level ?? viewingUser.role_rank_level;
+                // the roles list carries permission_codes (the privilege codes the role holds)
+                const roleCodes = userRole?.permission_codes || userRole?.privileges || [];
+                const fullAccess = Boolean(userRole?.is_all_access) || (!userRole && roleRank === 0);
                 return (
                   <div className="p-3.5 bg-[#FAF7F2] rounded-xl border border-[#E8DFD8] space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-[#180200] flex items-center gap-1.5">
                         <Shield className="w-3.5 h-3.5 text-[#510601]" />
-                        Assigned Role: {userRole?.name || 'Unassigned'}
-                        {userRole?.rank_level != null && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#510601]/10 text-[#510601] rounded-full">
-                            Rank {userRole.rank_level}
-                          </span>
-                        )}
+                        Assigned Role: {roleName || 'Unassigned'}
                       </span>
                       <span className="text-[10px] font-bold px-2 py-0.5 bg-[#510601]/10 text-[#510601] rounded-full">
-                        {userRole?.privileges?.length || 0} Privileges
+                        {fullAccess ? 'All privileges' : `${roleCodes.length} Privileges`}
                       </span>
                     </div>
 
@@ -1273,15 +1294,20 @@ export default function UserManagement() {
                         Accessible Modules
                       </span>
                       <div className="flex flex-wrap gap-1">
+                        {fullAccess && (
+                          <span className="px-2 py-0.5 bg-white border border-[#E8DFD8] rounded text-[10px] text-[#180200] font-medium">
+                            Every module
+                          </span>
+                        )}
                         {allPrivileges.map(mod => {
-                          const hasPrivs = mod.privileges.some(p =>
-                            userRole?.privileges?.includes(p.id)
+                          const hasPrivs = !fullAccess && mod.privileges.some(p =>
+                            roleCodes.includes(p.id)
                           );
                           if (!hasPrivs) return null;
 
                           return (
                             <span
-                              key={mod.id}
+                              key={mod.module}
                               className="px-2 py-0.5 bg-white border border-[#E8DFD8] rounded text-[10px] text-[#180200] font-medium"
                             >
                               {mod.module}
@@ -1295,152 +1321,11 @@ export default function UserManagement() {
               })()}
 
               {/* Read-only footer */}
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-[#E8DFD8]">
-                <button
-                  type="button"
-                  onClick={() => setViewingUser(null)}
-                  className="px-4 py-2 border border-[#E8DFD8] text-[#863221] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
+              <ModalFooter kind="view" onCancel={() => setViewingUser(null)} inForm />
 
             </div>
           </div>
         )}
-      </Modal>
-
-      {/* ============================================================ */}
-      {/* DELETE CONFIRMATION MODAL WITH ADMIN PROTECTION              */}
-      {/* ============================================================ */}
-      <Modal
-        isOpen={Boolean(deleteTargetUser)}
-        onClose={() => setDeleteTargetUser(null)}
-      >
-        {deleteTargetUser && (
-          <div
-            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {deleteTargetUser.isCurrentAdmin || deleteTargetUser.username === 'admin' ? (
-              <>
-                <div className="w-14 h-14 rounded-full bg-amber-100 text-[#EE6A00] flex items-center justify-center mx-auto mb-3.5">
-                  <Lock className="w-7 h-7" />
-                </div>
-
-                <h3 className="text-lg font-bold text-[#180200]">
-                  Cannot Delete User
-                </h3>
-                <p className="text-xs text-[#863221] mt-2 leading-relaxed">
-                  <strong className="text-[#180200]">{deleteTargetUser.name || deleteTargetUser.fullName}</strong> is the active Super Administrator account and cannot be deleted from the system.
-                </p>
-
-                <div className="mt-6">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTargetUser(null)}
-                    className="w-full py-2.5 px-4 bg-[#510601] hover:bg-[#8C1801] text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
-                  >
-                    Understood
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="w-14 h-14 rounded-full bg-red-100 text-[#ED4636] flex items-center justify-center mx-auto mb-3.5">
-                  <Trash2 className="w-7 h-7" />
-                </div>
-
-                <h3 className="text-lg font-bold text-[#180200]">
-                  Delete User?
-                </h3>
-                <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-                  Are you sure you want to delete user <strong className="text-[#180200]">{deleteTargetUser.name || deleteTargetUser.fullName}</strong> ({deleteTargetUser.username})? This action cannot be undone.
-                </p>
-
-                <div className="mt-6 flex items-center justify-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTargetUser(null)}
-                    className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteUser}
-                    className="w-full py-2.5 px-4 bg-[#ED4636] hover:bg-[#C93324] text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
-                  >
-                    Delete User
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </Modal>
-
-      {/* ============================================================ */}
-      {/* ACTIVATE / DEACTIVATE CONFIRMATION MODAL                     */}
-      {/* ============================================================ */}
-      <Modal
-        isOpen={Boolean(statusDialog)}
-        onClose={() => setStatusDialog(null)}
-      >
-        {statusDialog && (() => {
-          const isTargetDeactivate = statusDialog.newStatus === false || statusDialog.newStatus === 'Inactive';
-          const targetName = statusDialog.user.name || statusDialog.user.fullName;
-          return (
-            <div
-              className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3.5 ${isTargetDeactivate ? 'bg-red-100 text-[#ED4636]' : 'bg-[#3D705C]/10 text-[#3D705C]'
-                }`}>
-                {isTargetDeactivate ? (
-                  <AlertTriangle className="w-7 h-7" />
-                ) : (
-                  <CheckCircle2 className="w-7 h-7" />
-                )}
-              </div>
-
-              <h3 className="text-lg font-bold text-[#180200]">
-                {isTargetDeactivate ? 'Deactivate User?' : 'Activate User?'}
-              </h3>
-              <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-                {isTargetDeactivate ? (
-                  <>
-                    Are you sure you want to deactivate <strong className="text-[#180200]">{targetName}</strong>? Deactivated users will not be able to log in to the system.
-                  </>
-                ) : (
-                  <>
-                    Are you sure you want to activate <strong className="text-[#180200]">{targetName}</strong>? The user will be permitted to log in.
-                  </>
-                )}
-              </p>
-
-              <div className="mt-6 flex items-center justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setStatusDialog(null)}
-                  className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmStatusToggle}
-                  className={`w-full py-2.5 px-4 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer ${isTargetDeactivate
-                      ? 'bg-[#ED4636] hover:bg-[#C93324]'
-                      : 'bg-[#3D705C] hover:bg-[#2F5647]'
-                    }`}
-                >
-                  {isTargetDeactivate ? 'Deactivate' : 'Activate'}
-                </button>
-              </div>
-            </div>
-          );
-        })()}
       </Modal>
 
     </div>

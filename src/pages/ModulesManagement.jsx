@@ -16,17 +16,18 @@ import {
   Lock,
   AlertCircle,
   CheckCircle2,
-  RefreshCw,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
-  X
+  X,
 } from 'lucide-react';
 import api from '../api';
 import { notify } from '../utils/notify';
+import { confirmAction } from '../utils/actionConfirm';
 import { askChecklist } from '../utils/dialogs';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 
+import ModalFooter from '../components/ModalFooter';
 const emptyForm = {
   type: 'page', // 'page' (opens a screen) or 'section' (a side-menu heading that groups pages)
   code: '',
@@ -40,20 +41,20 @@ const emptyForm = {
   display_order: 0,
   min_rank_level: '',
   permission_code: '',
+  privileges: ['read', 'write', 'delete'], // which privileges to create & link (ticked from the form)
   status: true
-};
+};;
 
 export default function ModulesManagement() {
   const { myRank } = useAuth();
-  const isRank1 = myRank === 1;
+  const isRank1 = myRank === 0;
 
   const [modules, setModules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('Active'); // by default only the modules that are built and switched on
   const [openGroups, setOpenGroups] = useState({}); // module id -> true/false (open by default)
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize] = useState(10);
+  const [, setCurrentPage] = useState(1);
   const [view, setView] = useState('table'); // 'table' | 'arrange' (drag and drop the sidebar order)
 
   const [isAddEditOpen, setIsAddEditOpen] = useState(false);
@@ -62,6 +63,8 @@ export default function ModulesManagement() {
   const [formData, setFormData] = useState(emptyForm);
   const [formErrors, setFormErrors] = useState({});
   const [saving, setSaving] = useState(false);
+  const [sibOrders, setSibOrders] = useState({}); // neighbours renumbered by placing this module in the preview: id -> order
+  const [dragFrom, setDragFrom] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
@@ -124,11 +127,6 @@ export default function ModulesManagement() {
 
   const hiddenOffCount = statusFilter === 'Active' ? modules.filter((m) => !m.status).length : 0;
 
-  const parentName = (id) => {
-    if (id == null) return null;
-    const p = modules.find((m) => m.id === id || String(m.id) === String(id));
-    return p ? p.name_en : null;
-  };
 
   const handleClearFilters = () => {
     setSearchQuery('');
@@ -144,6 +142,7 @@ export default function ModulesManagement() {
     setEditingModule(null);
     setFormData({ ...emptyForm });
     setFormErrors({});
+    setSibOrders({});
     setIsAddEditOpen(true);
   };
 
@@ -163,14 +162,26 @@ export default function ModulesManagement() {
       display_order: m.display_order ?? 0,
       min_rank_level: m.min_rank_level ?? '',
       permission_code: m.permission_code || '',
+      privileges: ['read', 'write', 'delete'].filter((a) => (m.privileges || []).includes(`${m.code}.${a}`)),
       status: Boolean(m.status)
     });
     setFormErrors({});
+    setSibOrders({});
     setIsAddEditOpen(true);
+  };
+
+  const togglePrivilege = (action) => {
+    setFormData((prev) => ({
+      ...prev,
+      privileges: prev.privileges.includes(action)
+        ? prev.privileges.filter((a) => a !== action)
+        : [...prev.privileges, action]
+    }));
   };
 
   const handleFormChange = (e) => {
     const { name, value } = e.target;
+    if (name === 'parent_id' || name === 'display_order' || name === 'type') setSibOrders({});
     if (name === 'status') {
       setFormData((prev) => ({ ...prev, status: value === 'true' }));
       return;
@@ -217,8 +228,8 @@ export default function ModulesManagement() {
 
     if (formData.min_rank_level !== '' && formData.min_rank_level != null) {
       const rank = Number(formData.min_rank_level);
-      if (!Number.isInteger(rank) || rank < 1) {
-        errors.min_rank_level = 'Rank gate must be a whole number of 1 or more (leave empty for none)';
+      if (!Number.isInteger(rank) || rank < 0) {
+        errors.min_rank_level = 'Rank gate must be a whole number of 0 or more (leave empty for none)';
       }
     }
 
@@ -246,6 +257,7 @@ export default function ModulesManagement() {
           ? null
           : Number(formData.min_rank_level),
       permission_code: (formData.permission_code || '').trim() || null,
+      auto_privileges: formData.type === 'section' ? [] : formData.privileges,
       status: Boolean(formData.status)
     };
     if (modalMode === 'add') {
@@ -261,14 +273,28 @@ export default function ModulesManagement() {
     setIsAddEditOpen(false);
     setSaving(true);
     try {
+      // neighbours renumbered in the preview are saved with the same reason, before the module itself
+      const moved = Object.entries(sibOrders)
+        .map(([id, order]) => ({ m: modules.find((x) => String(x.id) === id), order }))
+        .filter(({ m, order }) => m && (m.display_order ?? 0) !== order);
+      let reasonHeaders = {};
+      if (moved.length) {
+        const reason = await confirmAction(modalMode === 'add' ? 'post' : 'put', '/users/modules');
+        if (!reason) { setSaving(false); return; }
+        reasonHeaders = { 'X-Action-Reason': reason };
+        await api.put('/users/modules/reorder',
+          { items: moved.map(({ m, order }) => ({ id: m.id, parent_id: m.parent_id ?? null, display_order: order })) },
+          { headers: reasonHeaders });
+      }
       if (modalMode === 'add') {
-        await api.post('/users/modules', buildPayload());
-        showToast('Module created successfully.');
+        await api.post('/users/modules', buildPayload(), { headers: reasonHeaders });
+        showToast(`Module created with ${formData.type === 'section' ? 0 : formData.privileges.length} privilege(s) linked.`);
       } else {
-        await api.put(`/users/modules/${editingModule.id}`, buildPayload());
+        await api.put(`/users/modules/${editingModule.id}`, buildPayload(), { headers: reasonHeaders });
         showToast('Module updated successfully.');
       }
       setFormData(emptyForm);
+      setSibOrders({});
       await fetchModules();
     } catch (err) {
       showToast(errDetail(err, 'Error saving module'), 'error');
@@ -346,10 +372,10 @@ export default function ModulesManagement() {
         <div className="w-14 h-14 rounded-full bg-[#FFC107]/15 text-[#863221] flex items-center justify-center mx-auto mb-4">
           <Lock className="w-7 h-7" />
         </div>
-        <h2 className="text-lg font-bold text-[#180200]">Module Master is Rank-1 Only</h2>
+        <h2 className="text-lg font-bold text-[#180200]">Access Restricted</h2>
         <p className="text-xs text-[#863221] mt-2 max-w-md mx-auto leading-relaxed">
           The module catalogue controls menu visibility, privileges and rank gates across the system.
-          It can only be managed by the Super Admin role (Rank 1). Your rank is {myRank}.
+          Your role is not allowed to manage it.
         </p>
         <Link
           to="/dashboard"
@@ -360,6 +386,18 @@ export default function ModulesManagement() {
       </div>
     );
   }
+
+  useSwalConfirm(
+    deleteTarget,
+    () => setDeleteTarget(null),
+    (d) => ({
+      title: 'Delete module?',
+      text: `You are about to remove ${d.name_en} (${d.code}).`,
+      confirmText: 'Yes, delete',
+      danger: true,
+    }),
+    confirmDelete
+  );
 
   return (
     <div className="space-y-6">
@@ -455,7 +493,6 @@ export default function ModulesManagement() {
             <thead>
               <tr className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-xs font-semibold text-[#863221] uppercase tracking-wider">
                 <th className="px-6 py-3.5">Module</th>
-                <th className="px-6 py-3.5">Route</th>
                 <th className="px-6 py-3.5 text-center">Order</th>
                 <th className="px-6 py-3.5 text-center">Rank Gate</th>
                 <th className="px-6 py-3.5 text-center">Privileges</th>
@@ -490,9 +527,6 @@ export default function ModulesManagement() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-6 py-4 text-xs font-mono text-[#863221]">
-                      {m.route || '—'}
-                    </td>
                     <td className="px-6 py-4 text-center text-xs font-semibold text-[#180200]">
                       {m.display_order ?? 0}
                     </td>
@@ -525,15 +559,14 @@ export default function ModulesManagement() {
                         }`}
                         title={m.status ? 'Click to disable module' : 'Click to enable module'}
                       >
-                        <span className={`w-1.5 h-1.5 rounded-full ${m.status ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                         {m.status ? 'Active' : 'Inactive'}
                       </button>
                     </td>
                     <td className="px-6 py-4 text-right">
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5">
                         <button
                           onClick={() => handleLinkPrivileges(m)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#510601] bg-[#FAF7F2] border border-[#E8DFD8] rounded-lg hover:bg-[#F1E7DE] transition-all cursor-pointer"
+                          className="btn-act"
                           title="Link privileges to this module"
                         >
                           <KeyRound className="w-3.5 h-3.5" />
@@ -541,7 +574,7 @@ export default function ModulesManagement() {
                         </button>
                         <button
                           onClick={() => openEditModal(m)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-all cursor-pointer"
+                          className="btn-act"
                           title="Edit Module"
                         >
                           <Pencil className="w-3.5 h-3.5" />
@@ -549,7 +582,7 @@ export default function ModulesManagement() {
                         </button>
                         <button
                           onClick={() => setDeleteTarget(m)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-all cursor-pointer"
+                          className="btn-act btn-act-danger"
                           title="Delete Module"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -605,7 +638,7 @@ export default function ModulesManagement() {
 
         {/* Count */}
         {treeRows.length > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-3.5 border-t border-[#E8DFD8] bg-[#FAF7F2]/50">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-3.5 border-t border-[#E8DFD8] bg-[#FAF7F2]">
             <span className="text-xs text-[#863221] font-medium">{treeRows.length} modules shown</span>
             {hiddenOffCount > 0 && (
               <span className="text-xs text-[#863221]/80">
@@ -625,7 +658,7 @@ export default function ModulesManagement() {
           className="bg-white rounded-2xl max-w-4xl w-full border border-[#E8DFD8] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-in zoom-in-95 duration-200"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Layers className="w-5 h-5" />
@@ -740,6 +773,33 @@ export default function ModulesManagement() {
                 <div className="hidden sm:block" />
               )}
 
+              {formData.type === 'page' ? (
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
+                    Privileges to create &amp; link {modalMode === 'add' && <span className="text-[#ED4636]">*</span>}
+                  </label>
+                  <div className="flex items-center gap-5 mt-1">
+                    {['read', 'write', 'delete'].map((a) => (
+                      <label key={a} className="inline-flex items-center gap-2 text-sm text-[#180200] cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={formData.privileges.includes(a)}
+                          onChange={() => togglePrivilege(a)}
+                          className="w-4 h-4 accent-[#510601] cursor-pointer"
+                        />
+                        {a}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[#863221]/70 mt-1">
+                    Each tick is created and linked as &lt;module code&gt;.read / .write / .delete on save.
+                    On edit, unticking removes the privilege unless a role still holds it.
+                  </p>
+                </div>
+              ) : (
+                <div className="hidden sm:block" />
+              )}
+
               {formData.type === 'page' && (
                 <div>
                   <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">
@@ -794,11 +854,66 @@ export default function ModulesManagement() {
                   </p>
                 )}
                   <p className="text-[10px] text-[#863221]/70 mt-1">Or drag it in Arrange menu.</p>
+                  {(() => {
+                    // live preview: the menu entries next to this one, in the order the sidebar shows them.
+                    // Drag this module (or use the arrows) to place it; the neighbours are renumbered 10, 20, 30...
+                    const parent = formData.parent_id === '' || formData.parent_id == null ? null : String(formData.parent_id);
+                    const order = Number(formData.display_order) || 0;
+                    const others = modules
+                      .filter((m) => (m.parent_id == null ? null : String(m.parent_id)) === parent && (!editingModule || m.id !== editingModule.id))
+                      .map((m) => ({ id: m.id, name_en: m.name_en, display_order: sibOrders[m.id] ?? m.display_order ?? 0 }))
+                      .sort((x, y) => (x.display_order - y.display_order) || (x.id - y.id));
+                    const mine = { id: editingModule ? editingModule.id : Number.MAX_SAFE_INTEGER, name_en: (formData.name_en || '').trim() || 'This module', display_order: order, current: true };
+                    const rows = [...others, mine].sort((x, y) => (x.display_order - y.display_order) || (x.id - y.id));
+                    const myIndex = rows.findIndex((r) => r.current);
+                    const place = (index) => {
+                      const i = Math.max(0, Math.min(others.length, index));
+                      const next = {};
+                      let k = 0;
+                      others.forEach((o, j) => {
+                        if (j === i) k += 1; // the slot kept for this module
+                        k += 1;
+                        next[o.id] = k * 10;
+                      });
+                      setSibOrders(next);
+                      setFormData((prev) => ({ ...prev, display_order: (i + 1) * 10 }));
+                    };
+                    return (
+                      <div className="mt-2 rounded-xl border border-[#E8DFD8] bg-[#FAF7F2] p-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-[#863221] mb-1">
+                          Preview{parent ? ' (inside its section)' : ' (top level)'} - drag your module or use the arrows
+                        </p>
+                        <ol className="max-h-56 overflow-y-auto space-y-0.5">
+                          {rows.map((r, i) => (
+                            <li key={r.current ? 'me' : r.id}
+                              draggable={Boolean(r.current)}
+                              onDragStart={r.current ? () => setDragFrom(true) : undefined}
+                              onDragEnd={() => setDragFrom(false)}
+                              onDragOver={dragFrom && !r.current ? (e) => e.preventDefault() : undefined}
+                              onDrop={dragFrom && !r.current ? (e) => { e.preventDefault(); setDragFrom(false); place(i); } : undefined}
+                              className={`flex items-center gap-2 px-2 py-1 rounded-lg text-xs ${r.current ? 'bg-[#510601] text-white font-bold cursor-grab' : 'text-[#180200]'} ${dragFrom && !r.current ? 'outline-dashed outline-1 outline-[#510601]/40' : ''}`}>
+                              <span className="w-5 text-right opacity-60">{i + 1}</span>
+                              <span className="flex-1 truncate">{r.name_en}</span>
+                              <span className="opacity-60">{r.display_order ?? 0}</span>
+                              {r.current && (
+                                <span className="flex gap-1">
+                                  <button type="button" disabled={myIndex === 0} onClick={() => place(myIndex - 1)}
+                                    className="px-1.5 rounded bg-white/20 hover:bg-white/30 disabled:opacity-30 cursor-pointer" aria-label="Move up">&#9650;</button>
+                                  <button type="button" disabled={myIndex === rows.length - 1} onClick={() => place(myIndex + 1)}
+                                    className="px-1.5 rounded bg-white/20 hover:bg-white/30 disabled:opacity-30 cursor-pointer" aria-label="Move down">&#9660;</button>
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-[#180200] uppercase tracking-wider mb-1.5">Rank gate</label>
-                  <input type="number" name="min_rank_level" min="1" value={formData.min_rank_level} onChange={handleFormChange}
+                  <input type="number" name="min_rank_level" min="0" value={formData.min_rank_level} onChange={handleFormChange}
                     className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm text-[#180200] focus:outline-none font-semibold ${formErrors.min_rank_level ? 'border-[#ED4636] ring-1 ring-[#ED4636]/30 bg-red-50/20' : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'}`} />
                   <p className="text-[10px] text-[#863221]/70 mt-1">Roles ranked worse than this number will not see it. Empty = everyone.</p>
                 {formErrors.min_rank_level && (
@@ -849,59 +964,9 @@ export default function ModulesManagement() {
             </details>
 
             </div>
-            <div className="shrink-0 flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsAddEditOpen(false)}
-                className="px-4 py-2.5 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={saving}
-                className="px-5 py-2.5 bg-[#510601] hover:bg-[#8C1801] active:bg-[#180200] text-white text-xs font-semibold rounded-xl shadow-sm hover:shadow transition-all cursor-pointer disabled:opacity-60"
-              >
-                {saving ? 'Saving...' : modalMode === 'add' ? 'Create Module' : 'Update Module'}
-              </button>
-            </div>
+            <ModalFooter kind={modalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsAddEditOpen(false)} busy={saving} />
           </form>
         </div>
-      </Modal>
-
-      {/* DELETE CONFIRM MODAL */}
-      <Modal isOpen={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)}>
-        {deleteTarget && (
-          <div
-            className="bg-white rounded-2xl max-w-2xl w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-14 h-14 rounded-full bg-red-100 text-[#ED4636] flex items-center justify-center mx-auto mb-3.5">
-              <Trash2 className="w-7 h-7" />
-            </div>
-            <h3 className="text-lg font-bold text-[#180200]">Delete Module?</h3>
-            <p className="text-xs text-[#863221] mt-2 leading-relaxed">
-              You are about to remove <span className="font-bold text-[#180200]">{deleteTarget.name_en}</span> ({deleteTarget.code}).
-              Modules with submodules or assigned privileges cannot be deleted.
-            </p>
-            <div className="flex gap-3 mt-5">
-              <button
-                type="button"
-                onClick={() => setDeleteTarget(null)}
-                className="flex-1 py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmDelete}
-                className="flex-1 py-2.5 px-4 bg-[#ED4636] hover:bg-[#c93a2c] text-white text-xs font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
-              >
-                Delete Module
-              </button>
-            </div>
-          </div>
-        )}
       </Modal>
     </div>
   );

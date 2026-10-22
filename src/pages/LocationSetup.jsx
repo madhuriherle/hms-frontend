@@ -1,11 +1,9 @@
+import FilterToggle from '../components/FilterToggle';
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Link } from 'react-router-dom';
 import Modal from '../components/Modal';
 import {
-  MapPin,
   Building,
   Layers,
-  FileText,
   Plus,
   Search,
   Pencil,
@@ -16,24 +14,26 @@ import {
   X,
   AlertCircle,
   AlertTriangle,
-  RefreshCw,
   Upload,
   Download,
   Filter,
   Check,
-  Info
 } from 'lucide-react';
 import api from '../api';
 import { askForm, confirmYesNo } from '../utils/dialogs';
 import { notify } from '../utils/notify';
 import useAuth from '../hooks/useAuth';
+import useSwalConfirm from '../hooks/useSwalConfirm';
 import PermissionGate from '../components/PermissionGate';
+import useRules, { hasDigits } from '../hooks/useRules';
 
+import ModalFooter from '../components/ModalFooter';
 // <select> values are always strings; API ids are numbers, so convert back
 // before comparing with `===` or sending to the API.
 const toId = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? v : Number(v));
 
 export default function LocationSetup() {
+  const rules = useRules(); // formats and limits from the server
   const { hasPermission } = useAuth();
 
   // ----------------------------------------------------
@@ -80,7 +80,7 @@ export default function LocationSetup() {
       });
       setStatesSummary(sMap);
     } catch (err) {
-      console.error(err);
+      console.error(err); showToast(err.response?.data?.detail || 'Could not load data from the server.', 'error');
     }
   };
 
@@ -94,8 +94,10 @@ export default function LocationSetup() {
   const [postalStateFilter, setPostalStateFilter] = useState('ALL');
   const [postalDistrictFilter, setPostalDistrictFilter] = useState('ALL');
   const [postalPrefixFilter, setPostalPrefixFilter] = useState('ALL');
+  const [pinPrefixes, setPinPrefixes] = useState([]); // the first two digits that exist in the PIN master
   const [postalPincodeFilter, setPostalPincodeFilter] = useState('');
   const [postalStatusFilter, setPostalStatusFilter] = useState('ALL');
+  const [postalFiltersOpen, setPostalFiltersOpen] = useState(false); // the PIN filters show only when the filter icon is clicked
 
   // Pagination for PIN Directory Table
   const [postalCurrentPage, setPostalCurrentPage] = useState(1);
@@ -117,6 +119,10 @@ export default function LocationSetup() {
 
   useEffect(() => {
     fetchMasters();
+  }, []);
+
+  useEffect(() => {
+    api.get('/meta/pin-prefixes').then(({ data }) => setPinPrefixes(data || [])).catch(() => {});
   }, []);
 
   // Districts of the selected state, with the real taluk and PIN count of each
@@ -152,7 +158,7 @@ export default function LocationSetup() {
       api.get(`/masters/taluks-summary?district_id=${selectedDistrictIdForTaluk}`)
     ])
       .then(([res, sum]) => {
-        const mapTk = t => ({ id: t.id, name: t.name_en, districtId: t.district_id, stateId: t.state_id, status: t.status ? 'Active' : 'Inactive' });
+        const mapTk = t => ({ id: t.id, name: t.name_en, districtId: t.district_id, stateId: t.state_id || selectedStateId, status: t.status ? 'Active' : 'Inactive' });
         setTaluks((res.data?.data || []).map(mapTk));
         const map = {};
         (sum.data?.data || []).forEach((row) => { map[row.id] = row.pins || 0; });
@@ -200,41 +206,95 @@ export default function LocationSetup() {
           setTotalPostalPages(Math.max(1, Math.ceil((data?.total || 0) / postalPageSize)));
           setPostalTotalRecords(data?.total || 0);
         } catch (err) {
-          console.error(err);
+          console.error(err); showToast(err.response?.data?.detail || 'Could not load data from the server.', 'error');
         }
       };
       fetchPostalCodes();
     }
-  }, [activeTab, postalCurrentPage, postalPageSize, postalSearchQuery, postalPincodeFilter, postalStateFilter, postalDistrictFilter, postalPrefixFilter, postalStatusFilter, states]);
+  }, [activeTab, postalCurrentPage, postalPageSize, postalSearchQuery, postalPincodeFilter, postalStateFilter, postalDistrictFilter, postalPrefixFilter, postalStatusFilter, states, summaryTick]);
+
+  // Modals for Taluk (declared before the effects below that read them)
+  const [isTalukModalOpen, setIsTalukModalOpen] = useState(false);
+  const [talukModalMode, setTalukModalMode] = useState('add'); // 'add' | 'edit'
+  const [editingTaluk, setEditingTaluk] = useState(null);
+  const [talukFormData, setTalukFormData] = useState({
+    name: '',
+    stateId: '',
+    districtId: '',
+    status: 'Active'
+  });
+  const [talukFormErrors, setTalukFormErrors] = useState({});
 
   // Modals Data Fetching
   const [modalDistricts, setModalDistricts] = useState([]);
   const [modalTaluks, setModalTaluks] = useState([]);
+  const [talukModalDistricts, setTalukModalDistricts] = useState([]);
 
+  // Taluk Modal: Districts for the selected state in Taluk modal
+  useEffect(() => {
+    if (!isTalukModalOpen || !talukFormData.stateId) {
+      setTalukModalDistricts([]);
+      return;
+    }
+    if (talukFormData.stateId === selectedStateId && districts.length > 0) {
+      setTalukModalDistricts(districts);
+      return;
+    }
+    api.get(`/masters/districts?state_id=${talukFormData.stateId}&limit=2000`)
+      .then(res => {
+        const list = (res.data?.data || []).map(d => ({
+          id: d.id,
+          name: d.name_en || d.name,
+          stateId: d.state_id,
+          status: (d.status === true || d.status === 'Active') ? 'Active' : 'Inactive'
+        }));
+        setTalukModalDistricts(list);
+      })
+      .catch(console.error);
+  }, [isTalukModalOpen, talukFormData.stateId, selectedStateId, districts]);
+
+  // Postal Modal: Districts for the selected state in PIN modal
   useEffect(() => {
     if (isPostalModalOpen && postalFormData.stateId) {
-      api.get(`/masters/districts?state_id=${postalFormData.stateId}&limit=2000`).then(res => {
-         setModalDistricts(res.data?.data || []);
-      });
+      api.get(`/masters/districts?state_id=${postalFormData.stateId}&limit=2000`)
+        .then(res => {
+          const list = (res.data?.data || []).map(d => ({
+            id: d.id,
+            name: d.name_en || d.name,
+            stateId: d.state_id,
+            status: (d.status === true || d.status === 'Active') ? 'Active' : 'Inactive'
+          }));
+          setModalDistricts(list);
+        })
+        .catch(console.error);
+    } else {
+      setModalDistricts([]);
     }
   }, [isPostalModalOpen, postalFormData.stateId]);
 
+  // Postal Modal: Taluks for the selected district in PIN modal
   useEffect(() => {
     if (isPostalModalOpen && postalFormData.districtId) {
-      api.get(`/masters/taluks?district_id=${postalFormData.districtId}&limit=2000`).then(res => {
-         setModalTaluks(res.data?.data || []);
-      });
+      api.get(`/masters/taluks?district_id=${postalFormData.districtId}&limit=2000`)
+        .then(res => {
+          const list = (res.data?.data || []).map(t => ({
+            id: t.id,
+            name: t.name_en || t.name,
+            districtId: t.district_id,
+            status: (t.status === true || t.status === 'Active') ? 'Active' : 'Inactive'
+          }));
+          setModalTaluks(list);
+        })
+        .catch(console.error);
+    } else {
+      setModalTaluks([]);
     }
   }, [isPostalModalOpen, postalFormData.districtId]);
 
 
-  const persistStates = () => { fetchMasters(); };
-  const persistDistricts = () => { fetchMasters(); };
-  const persistTaluks = () => { fetchMasters(); };
-  const persistPostalCodes = () => { fetchMasters(); };
 
   // Toast feedback
-  const [toastMessage, setToastMessage] = useState(null);
+  const [toastMessage] = useState(null);
   const showToast = (message, type = 'success') => {
     notify(message, type);
   };
@@ -257,18 +317,6 @@ export default function LocationSetup() {
     status: 'Active'
   });
   const [districtFormErrors, setDistrictFormErrors] = useState({});
-
-  // Modals for Taluk
-  const [isTalukModalOpen, setIsTalukModalOpen] = useState(false);
-  const [talukModalMode, setTalukModalMode] = useState('add'); // 'add' | 'edit'
-  const [editingTaluk, setEditingTaluk] = useState(null);
-  const [talukFormData, setTalukFormData] = useState({
-    name: '',
-    stateId: '',
-    districtId: '',
-    status: 'Active'
-  });
-  const [talukFormErrors, setTalukFormErrors] = useState({});
 
   // Confirmation Modals (Delete & Status)
   const [deleteDialog, setDeleteDialog] = useState(null); // { type: 'state' | 'district' | 'taluk' | 'postal', item }
@@ -397,7 +445,7 @@ export default function LocationSetup() {
     setEditingTaluk(null);
     setTalukFormData({
       name: '',
-      stateId: currentState.id,
+      stateId: currentState.id || selectedStateId,
       districtId: currentDistrictForTaluk ? currentDistrictForTaluk.id : (stateDistricts[0]?.id || ''),
       status: 'Active'
     });
@@ -408,9 +456,11 @@ export default function LocationSetup() {
   const handleOpenEditTaluk = (taluk) => {
     setTalukModalMode('edit');
     setEditingTaluk(taluk);
+    const parentDist = districts.find((d) => d.id === taluk.districtId);
+    const resolvedStateId = taluk.stateId || parentDist?.stateId || selectedStateId || currentState.id;
     setTalukFormData({
       name: taluk.name,
-      stateId: taluk.stateId,
+      stateId: resolvedStateId,
       districtId: taluk.districtId,
       status: taluk.status
     });
@@ -425,7 +475,11 @@ export default function LocationSetup() {
 
     if (!trimmedName) {
       errors.name = 'Taluk name is required';
-    } else if (!talukFormData.districtId) {
+    }
+    if (!talukFormData.stateId) {
+      errors.stateId = 'Please select a state';
+    }
+    if (!talukFormData.districtId) {
       errors.districtId = 'Please select a parent district';
     }
 
@@ -434,20 +488,20 @@ export default function LocationSetup() {
       return;
     }
 
-    const targetDist = districts.find((d) => d.id === talukFormData.districtId);
+    const distId = toId(talukFormData.districtId);
 
     try {
       if (talukModalMode === 'add') {
         await api.post('/masters/taluks', {
           name_en: trimmedName,
-          district_id: targetDist.id,
+          district_id: distId,
           status: talukFormData.status === 'Active'
         });
         showToast(`Taluk "${trimmedName}" created successfully.`);
       } else {
         await api.put(`/masters/taluks/${editingTaluk.id}`, {
           name_en: trimmedName,
-          district_id: targetDist.id,
+          district_id: distId,
           status: talukFormData.status === 'Active'
         });
         showToast(`Taluk "${trimmedName}" updated successfully.`);
@@ -465,17 +519,17 @@ export default function LocationSetup() {
   const [importFile, setImportFile] = useState(null);
   const [importPreviewRows, setImportPreviewRows] = useState([]);
   const [importSummary, setImportSummary] = useState(null);
-  const [isProcessingImport, setIsProcessingImport] = useState(false);
+  const [, setIsProcessingImport] = useState(false);
   const fileInputRef = useRef(null);
 
   // Filtered districts for Add/Edit PIN modal based on selected state
   const activeDistrictsForModal = useMemo(() => {
-    return modalDistricts.filter((d) => postalModalMode === 'edit' || d.status);
+    return modalDistricts.filter((d) => postalModalMode === 'edit' || d.status === 'Active');
   }, [modalDistricts, postalModalMode]);
 
   // Filtered taluks for Add/Edit PIN modal based on selected district
   const activeTaluksForModal = useMemo(() => {
-    return modalTaluks.filter((t) => postalModalMode === 'edit' || t.status);
+    return modalTaluks.filter((t) => postalModalMode === 'edit' || t.status === 'Active');
   }, [modalTaluks, postalModalMode]);
 
   // Available districts for Postal Directory filter dropdown
@@ -509,7 +563,10 @@ export default function LocationSetup() {
   const handleOpenAddPostal = () => {
     setPostalModalMode('add');
     setEditingPostal(null);
-    const activeState = states.find((s) => s.status === 'Active') || states[0];
+    const activeState =
+      states.find((s) => s.id === selectedStateId && s.status === 'Active') ||
+      states.find((s) => s.status === 'Active') ||
+      states[0];
 
     setPostalFormData({
       postalCode: '',
@@ -546,8 +603,8 @@ export default function LocationSetup() {
 
     if (!cleanPin) {
       errors.postalCode = 'PIN Code is required';
-    } else if (!/^\d{6}$/.test(cleanPin)) {
-      errors.postalCode = 'PIN Code must be exactly 6 numeric digits (0-9)';
+    } else if (!hasDigits(cleanPin, rules?.pincode?.digits)) {
+      errors.postalCode = `PIN Code must be exactly ${rules?.pincode?.digits} numeric digits (0-9)`;
     }
 
     if (!cleanArea) {
@@ -567,9 +624,9 @@ export default function LocationSetup() {
         await api.post('/masters/postal-codes', {
           pincode: cleanPin,
           post_office_name: cleanArea,
-          state_id: postalFormData.stateId,
-          district_id: postalFormData.districtId,
-          taluk_id: postalFormData.talukId,
+          state_id: toId(postalFormData.stateId),
+          district_id: toId(postalFormData.districtId),
+          taluk_id: toId(postalFormData.talukId),
           status: postalFormData.status === 'Active'
         });
         showToast(`PIN Code ${cleanPin} (${cleanArea}) added successfully.`);
@@ -577,9 +634,9 @@ export default function LocationSetup() {
         await api.put(`/masters/postal-codes/${editingPostal.id}`, {
           pincode: cleanPin,
           post_office_name: cleanArea,
-          state_id: postalFormData.stateId,
-          district_id: postalFormData.districtId,
-          taluk_id: postalFormData.talukId,
+          state_id: toId(postalFormData.stateId),
+          district_id: toId(postalFormData.districtId),
+          taluk_id: toId(postalFormData.talukId),
           status: postalFormData.status === 'Active'
         });
         showToast(`PIN Code ${cleanPin} updated successfully.`);
@@ -594,23 +651,20 @@ export default function LocationSetup() {
   // ====================================================
   // BULK IMPORT LOGIC & TEMPLATE DOWNLOAD
   // ====================================================
-  const handleDownloadSampleTemplate = () => {
-    const csvContent = `pin_code,post_office_name,taluk_name,district_name,state_name
-576101,Udupi H.O,Udupi,Udupi,Karnataka
-575001,Mangaluru H.O,Mangaluru,Dakshina Kannada,Karnataka
-560003,Malleswaram H.O,Bengaluru North,Bengaluru Urban,Karnataka
-581401,Sirsi H.O,Sirsi,Uttara Kannada,Karnataka
-671121,Kasaragod H.O,Kasaragod,Kasaragod,Kerala
-670001,Kannur H.O,Kannur,Kannur,Kerala`;
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'location_postal_codes_template.csv');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleDownloadSampleTemplate = async () => {
+    try {
+      const { data } = await api.get('/meta/import-template/postal-codes', { responseType: 'blob' });
+      const url = URL.createObjectURL(data);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', 'location_postal_codes_template.csv');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      showToast('Could not download the template.', 'error');
+    }
   };
 
   const handleExportPostalCodes = () => {
@@ -712,7 +766,7 @@ export default function LocationSetup() {
       };
 
       // 1. Validate PIN code (exact 6 numeric digits)
-      if (!rowData.pinCode || !/^\d{6}$/.test(rowData.pinCode)) {
+      if (!rowData.pinCode || !hasDigits(rowData.pinCode, rules?.pincode?.digits)) {
         rowData.isValid = false;
         rowData.errorType = 'INVALID_PIN';
         rowData.errorMsg = 'PIN must be exactly 6 numeric digits';
@@ -920,20 +974,33 @@ export default function LocationSetup() {
     setDeleteDialog(null);
   };
 
+  useSwalConfirm(
+    statusDialog,
+    () => setStatusDialog(null),
+    (d) => ({
+      title: `${d.nextStatus === 'Inactive' ? 'Deactivate' : 'Activate'} location?`,
+      text: `Are you sure you want to mark ${d.item.name || `${d.item.postalCode} (${d.item.area})`} as ${d.nextStatus}?`,
+      confirmText: d.nextStatus === 'Inactive' ? 'Yes, deactivate' : 'Yes, activate',
+      danger: d.nextStatus === 'Inactive',
+    }),
+    handleConfirmStatusToggle
+  );
+
+  useSwalConfirm(
+    deleteDialog,
+    () => setDeleteDialog(null),
+    (d) => ({
+      title: 'Delete?',
+      text: `Are you sure you want to delete ${d.item?.name || `${d.item?.postalCode} (${d.item?.area})`}?`,
+      confirmText: 'Yes, delete',
+      danger: true,
+    }),
+    handleConfirmDelete
+  );
+
   return (
     <PermissionGate required="masters.location.read">
     <div className="space-y-6">
-      {/* ---------------------------------------------------- */}
-      {/* BREADCRUMB & HEADER                                  */}
-      {/* ---------------------------------------------------- */}
-      <div>
-<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#180200] tracking-tight">Location Setup</h1>
-
-          </div>
-        </div>
-      </div>
 
       {/* ---------------------------------------------------- */}
       {/* TOP TAB SWITCHER (INTERNAL MODULE TABS)             */}
@@ -1019,45 +1086,46 @@ export default function LocationSetup() {
                               nextStatus: st.status === 'Active' ? 'Inactive' : 'Active'
                             });
                           }}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                          className={`text-xs font-semibold cursor-pointer ${
                             st.status === 'Active'
-                              ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 border border-[#3D705C]/20'
-                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                              ? 'chip chip-on'
+                              : 'chip chip-off'
                           }`}
                           title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : `Click to ${st.status === 'Active' ? 'deactivate' : 'activate'}`}
                         >
-                          <span className={`w-1.5 h-1.5 rounded-full ${st.status === 'Active' ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                           <span>{st.status}</span>
                         </button>
                         {/* Edit / Delete of a state are switched off for now (Karnataka and Kerala are the only states).
                             Remove this comment (this line and the closing line) to bring them back. */}
                         {/*
-                        <button
-                          type="button"
-                          disabled={!hasPermission('masters.location.write')}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleEditState(st);
-                          }}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : 'Edit State'}
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                          <span>Edit</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!hasPermission('masters.location.delete')}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteState(st);
-                          }}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          title={!hasPermission('masters.location.delete') ? 'Requires masters.location.delete permission' : 'Delete State'}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Delete</span>
-                        </button>
+                        {hasPermission('masters.location.write') && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditState(st);
+                            }}
+                            className="btn-act"
+                            title={'Edit State'}
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                        {hasPermission('masters.location.delete') && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteState(st);
+                            }}
+                            className="btn-act btn-act-danger"
+                            title={'Delete State'}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        )}
                         */}
                       </div>
                     </div>
@@ -1083,16 +1151,17 @@ export default function LocationSetup() {
                     Manage districts belonging to {currentState.name}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleOpenAddDistrict}
-                  disabled={!hasPermission('masters.location.write')}
-                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#510601] text-white text-xs font-semibold rounded-lg hover:bg-[#863221] transition-colors self-start sm:self-auto"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add District</span>
-                </button>
+                {hasPermission('masters.location.write') && (
+                  <button
+                    type="button"
+                    onClick={handleOpenAddDistrict}
+
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#510601] text-white text-xs font-semibold rounded-lg hover:bg-[#863221] transition-colors self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add District</span>
+                  </button>
+                )}
               </div>
 
               {/* District Search */}
@@ -1122,7 +1191,7 @@ export default function LocationSetup() {
                 <table className="w-full text-left border-collapse text-xs">
                   <thead className="bg-[#FAF7F2] sticky top-0 z-10 border-b border-[#E8DFD8] text-[#863221] font-semibold">
                     <tr>
-                      <th className="py-2.5 px-3">District Name</th>
+                      <th className="py-2.5 px-3">District</th>
                       <th className="py-2.5 px-3 text-center">Taluks</th>
                       <th className="py-2.5 px-3 text-center">Status</th>
                       <th className="py-2.5 px-3 text-right">Actions</th>
@@ -1172,39 +1241,40 @@ export default function LocationSetup() {
                                     nextStatus: dist.status === 'Active' ? 'Inactive' : 'Active'
                                   })
                                 }
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer ${
+                                className={`text-xs font-semibold cursor-pointer ${
                                   dist.status === 'Active'
-                                    ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 border border-[#3D705C]/20'
-                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                                    ? 'chip chip-on'
+                                    : 'chip chip-off'
                                 }`}
                                 title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : `Click to ${dist.status === 'Active' ? 'deactivate' : 'activate'}`}
                               >
-                                <span className={`w-1.5 h-1.5 rounded-full ${dist.status === 'Active' ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                                 <span>{dist.status}</span>
                               </button>
                             </td>
                             <td className="py-2.5 px-3 text-right">
-                              <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenEditDistrict(dist)}
-                                  disabled={!hasPermission('masters.location.write')}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : 'Edit District'}
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                  <span>Edit</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleteDialog({ type: 'district', item: dist })}
-                                  disabled={!hasPermission('masters.location.delete')}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                  title={!hasPermission('masters.location.delete') ? 'Requires masters.location.delete permission' : 'Delete District'}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  <span>Delete</span>
-                                </button>
+                              <div className="flex flex-wrap items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                {hasPermission('masters.location.write') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEditDistrict(dist)}
+                                    className="btn-act"
+                                    title={'Edit District'}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                    <span>Edit</span>
+                                  </button>
+                                )}
+                                {hasPermission('masters.location.delete') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeleteDialog({ type: 'district', item: dist })}
+                                    className="btn-act btn-act-danger"
+                                    title={'Delete District'}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Delete</span>
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1232,16 +1302,17 @@ export default function LocationSetup() {
                     Under {currentState.name} → {currentDistrictForTaluk?.name || 'Selected District'}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleOpenAddTaluk}
-                  disabled={!currentDistrictForTaluk || !hasPermission('masters.location.write')}
-                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#510601] text-white text-xs font-semibold rounded-lg hover:bg-[#863221] disabled:opacity-50 transition-colors self-start sm:self-auto"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Taluk</span>
-                </button>
+                {hasPermission('masters.location.write') && (
+                  <button
+                    type="button"
+                    onClick={handleOpenAddTaluk}
+                    disabled={!currentDistrictForTaluk}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#510601] text-white text-xs font-semibold rounded-lg hover:bg-[#863221] disabled:opacity-50 transition-colors self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Taluk</span>
+                  </button>
+                )}
               </div>
 
               {/* District Dropdown Selector & Taluk Search */}
@@ -1284,7 +1355,7 @@ export default function LocationSetup() {
                 <table className="w-full text-left border-collapse text-xs">
                   <thead className="bg-[#FAF7F2] sticky top-0 z-10 border-b border-[#E8DFD8] text-[#863221] font-semibold">
                     <tr>
-                      <th className="py-2.5 px-3">Taluk Name</th>
+                      <th className="py-2.5 px-3">Taluk</th>
                       <th className="py-2.5 px-3 text-center">PIN Codes</th>
                       <th className="py-2.5 px-3 text-center">Status</th>
                       <th className="py-2.5 px-3 text-right">Actions</th>
@@ -1322,39 +1393,40 @@ export default function LocationSetup() {
                                     nextStatus: tk.status === 'Active' ? 'Inactive' : 'Active'
                                   })
                                 }
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer ${
+                                className={`text-xs font-semibold cursor-pointer ${
                                   tk.status === 'Active'
-                                    ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 border border-[#3D705C]/20'
-                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                                    ? 'chip chip-on'
+                                    : 'chip chip-off'
                                 }`}
                                 title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : `Click to ${tk.status === 'Active' ? 'deactivate' : 'activate'}`}
                               >
-                                <span className={`w-1.5 h-1.5 rounded-full ${tk.status === 'Active' ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                                 <span>{tk.status}</span>
                               </button>
                             </td>
                             <td className="py-2.5 px-3 text-right">
-                              <div className="flex items-center justify-end gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenEditTaluk(tk)}
-                                  disabled={!hasPermission('masters.location.write')}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : 'Edit Taluk'}
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                  <span>Edit</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleteDialog({ type: 'taluk', item: tk })}
-                                  disabled={!hasPermission('masters.location.delete')}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                  title={!hasPermission('masters.location.delete') ? 'Requires masters.location.delete permission' : 'Delete Taluk'}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  <span>Delete</span>
-                                </button>
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                {hasPermission('masters.location.write') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEditTaluk(tk)}
+                                    className="btn-act"
+                                    title={'Edit Taluk'}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                    <span>Edit</span>
+                                  </button>
+                                )}
+                                {hasPermission('masters.location.delete') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeleteDialog({ type: 'taluk', item: tk })}
+                                    className="btn-act btn-act-danger"
+                                    title={'Delete Taluk'}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Delete</span>
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1405,31 +1477,38 @@ export default function LocationSetup() {
 
               {/* Action Buttons: Add, Bulk Import, Export */}
               <div className="flex items-center flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={handleOpenAddPostal}
-                  disabled={!hasPermission('masters.location.write')}
-                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[#510601] text-white text-sm font-semibold rounded-lg hover:bg-[#863221] transition-colors shadow-sm"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add PIN Code</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={!hasPermission('masters.location.write')}
-                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                  onClick={() => {
-                    setImportFile(null);
-                    setImportPreviewRows([]);
-                    setImportSummary(null);
-                    setIsImportModalOpen(true);
-                  }}
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-[#510601] text-[#510601] text-sm font-semibold rounded-lg hover:bg-[#FAF7F2] transition-colors shadow-sm"
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Bulk Import</span>
-                </button>
+                <FilterToggle
+                  open={postalFiltersOpen}
+                  onToggle={() => setPostalFiltersOpen((o) => !o)}
+                  count={(postalStateFilter !== 'ALL' ? 1 : 0) + (postalDistrictFilter !== 'ALL' ? 1 : 0) + (postalPrefixFilter !== 'ALL' ? 1 : 0) + (postalStatusFilter !== 'ALL' ? 1 : 0)}
+                />
+                {hasPermission('masters.location.write') && (
+                  <button
+                    type="button"
+                    onClick={handleOpenAddPostal}
+
+                    className="flex items-center gap-1.5 px-4 py-2 bg-[#510601] text-white text-sm font-semibold rounded-lg hover:bg-[#863221] transition-colors shadow-sm"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add PIN Code</span>
+                  </button>
+                )}
+                {hasPermission('masters.location.write') && (
+                  <button
+                    type="button"
+
+                    onClick={() => {
+                      setImportFile(null);
+                      setImportPreviewRows([]);
+                      setImportSummary(null);
+                      setIsImportModalOpen(true);
+                    }}
+                    className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-[#510601] text-[#510601] text-sm font-semibold rounded-lg hover:bg-[#FAF7F2] transition-colors shadow-sm"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Bulk Import</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleExportPostalCodes}
@@ -1442,7 +1521,8 @@ export default function LocationSetup() {
               </div>
             </div>
 
-            {/* Filter Controls Row */}
+            {/* Filter Controls Row (shown when the filter icon is clicked) */}
+            {postalFiltersOpen && (
             <div className="pt-3 border-t border-[#E8DFD8] grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               {/* State Filter */}
               <div>
@@ -1494,7 +1574,6 @@ export default function LocationSetup() {
                     type="text"
                     inputMode="numeric"
                     maxLength={6}
-                    placeholder="e.g. 560001"
                     value={postalPincodeFilter}
                     onChange={(e) => {
                       setPostalPincodeFilter(e.target.value.replace(/\D/g, ''));
@@ -1517,12 +1596,9 @@ export default function LocationSetup() {
                   className="w-full py-1.5 px-2.5 text-xs bg-white border border-[#E8DFD8] rounded-lg focus:outline-none focus:ring-1 focus:ring-[#510601] text-[#180200]"
                 >
                   <option value="ALL">All Prefixes</option>
-                  <option value="56">56xxxx (Bengaluru & surrounding)</option>
-                  <option value="57">57xxxx (Coastal & Malnad KA)</option>
-                  <option value="58">58xxxx (North KA)</option>
-                  <option value="67">67xxxx (North Kerala)</option>
-                  <option value="68">68xxxx (Central Kerala)</option>
-                  <option value="69">69xxxx (South Kerala)</option>
+                  {pinPrefixes.map((p) => (
+                    <option key={p.prefix} value={p.prefix}>{p.prefix}xxxx ({p.count} codes)</option>
+                  ))}
                 </select>
               </div>
 
@@ -1554,6 +1630,7 @@ export default function LocationSetup() {
                 </button>
               </div>
             </div>
+            )}
           </div>
 
           {/* Postal Directory Data Table */}
@@ -1563,7 +1640,7 @@ export default function LocationSetup() {
                 <thead className="bg-[#FAF7F2] border-b border-[#E8DFD8] text-[#863221] font-semibold">
                   <tr>
                     <th className="py-3 px-4">PIN Code</th>
-                    <th className="py-3 px-4">Post Office / Area Name</th>
+                    <th className="py-3 px-4">Area</th>
                     <th className="py-3 px-4">Taluk</th>
                     <th className="py-3 px-4">District</th>
                     <th className="py-3 px-4">State</th>
@@ -1614,39 +1691,40 @@ export default function LocationSetup() {
                                   nextStatus: displayStatus === 'Active' ? 'Inactive' : 'Active'
                                 })
                               }
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                              className={`text-xs font-semibold cursor-pointer ${
                                 displayStatus === 'Active'
-                                  ? 'bg-[#3D705C]/10 text-[#3D705C] hover:bg-[#3D705C]/20 border border-[#3D705C]/20'
-                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                                  ? 'chip chip-on'
+                                  : 'chip chip-off'
                               }`}
                               title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : `Click to ${displayStatus === 'Active' ? 'deactivate' : 'activate'}`}
                             >
-                              <span className={`w-1.5 h-1.5 rounded-full ${displayStatus === 'Active' ? 'bg-[#3D705C]' : 'bg-gray-400'}`} />
                               <span>{displayStatus}</span>
                             </button>
                           </td>
                           <td className="py-3 px-4 text-right">
                             <div className="flex items-center justify-end gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handleOpenEditPostal(item)}
-                                disabled={!hasPermission('masters.location.write')}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : 'Edit PIN Code Mapping'}
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                                <span>Edit</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeleteDialog({ type: 'postal', item })}
-                                disabled={!hasPermission('masters.location.delete')}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                                title={!hasPermission('masters.location.delete') ? 'Requires masters.location.delete permission' : 'Delete PIN Code'}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>Delete</span>
-                              </button>
+                              {hasPermission('masters.location.write') && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditPostal(item)}
+                                  className="btn-act"
+                                  title={'Edit PIN Code Mapping'}
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                  <span>Edit</span>
+                                </button>
+                              )}
+                              {hasPermission('masters.location.delete') && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteDialog({ type: 'postal', item })}
+                                  className="btn-act btn-act-danger"
+                                  title={'Delete PIN Code'}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1659,7 +1737,7 @@ export default function LocationSetup() {
 
             {/* Pagination Controls */}
             {postalTotalRecords > 0 && (
-              <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#863221]">
+              <div className="p-4 border-t border-[#E8DFD8] bg-[#FAF7F2] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-[#863221]">
                 <div className="flex items-center gap-2">
                   <span>Showing</span>
                   <span className="font-bold text-[#180200]">
@@ -1732,7 +1810,7 @@ export default function LocationSetup() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Layers className="w-5 h-5" />
@@ -1810,21 +1888,7 @@ export default function LocationSetup() {
               </select>
             </div>
 
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsDistrictModalOpen(false)}
-                className="py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="py-2.5 px-5 bg-[#510601] hover:bg-[#863221] text-white text-xs font-bold rounded-xl shadow-sm transition-colors cursor-pointer"
-              >
-                {districtModalMode === 'add' ? 'Add District' : 'Save Changes'}
-              </button>
-            </div>
+            <ModalFooter kind={districtModalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsDistrictModalOpen(false)} inForm />
           </form>
         </div>
       </Modal>
@@ -1841,7 +1905,7 @@ export default function LocationSetup() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Layers className="w-5 h-5" />
@@ -1871,21 +1935,34 @@ export default function LocationSetup() {
                 value={talukFormData.stateId}
                 onChange={(e) => {
                   const newStateId = toId(e.target.value);
-                  const matchDists = districts.filter((d) => d.stateId === newStateId);
-                  setTalukFormData({
-                    ...talukFormData,
+                  setTalukFormData((prev) => ({
+                    ...prev,
                     stateId: newStateId,
-                    districtId: matchDists[0] ? matchDists[0].id : ''
-                  });
+                    districtId: ''
+                  }));
+                  if (talukFormErrors.stateId) {
+                    setTalukFormErrors((prev) => ({ ...prev, stateId: null }));
+                  }
                 }}
-                className="w-full px-3.5 py-2.5 bg-white border border-[#E8DFD8] rounded-xl text-sm font-medium text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601]"
+                className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors ${
+                  talukFormErrors.stateId
+                    ? 'border-red-500 ring-1 ring-red-500/30 bg-red-50/20'
+                    : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
+                }`}
               >
+                <option value="">-- Select State --</option>
                 {states.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
                   </option>
                 ))}
               </select>
+              {talukFormErrors.stateId && (
+                <p className="text-xs text-red-600 mt-1 font-medium flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  {talukFormErrors.stateId}
+                </p>
+              )}
             </div>
 
             <div>
@@ -1895,25 +1972,24 @@ export default function LocationSetup() {
               <select
                 value={talukFormData.districtId}
                 onChange={(e) => {
-                  setTalukFormData({ ...talukFormData, districtId: toId(e.target.value) });
+                  setTalukFormData((prev) => ({ ...prev, districtId: toId(e.target.value) }));
                   if (talukFormErrors.districtId) {
-                    setTalukFormErrors({ ...talukFormErrors, districtId: null });
+                    setTalukFormErrors((prev) => ({ ...prev, districtId: null }));
                   }
                 }}
-                className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors ${
+                disabled={!talukFormData.stateId}
+                className={`w-full px-3.5 py-2.5 bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors disabled:bg-gray-100 disabled:cursor-not-allowed ${
                   talukFormErrors.districtId
                     ? 'border-red-500 ring-1 ring-red-500/30 bg-red-50/20'
                     : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
                 }`}
               >
                 <option value="">-- Select District --</option>
-                {districts
-                  .filter((d) => d.stateId === talukFormData.stateId)
-                  .map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} ({d.status})
-                    </option>
-                  ))}
+                {talukModalDistricts.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name || d.name_en} {d.status === 'Inactive' ? '(Inactive)' : ''}
+                  </option>
+                ))}
               </select>
               {talukFormErrors.districtId && (
                 <p className="text-xs text-red-600 mt-1 font-medium flex items-center gap-1">
@@ -1962,21 +2038,7 @@ export default function LocationSetup() {
               </select>
             </div>
 
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsTalukModalOpen(false)}
-                className="py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="py-2.5 px-5 bg-[#510601] hover:bg-[#863221] text-white text-xs font-bold rounded-xl shadow-sm transition-colors cursor-pointer"
-              >
-                {talukModalMode === 'add' ? 'Add Taluk' : 'Save Changes'}
-              </button>
-            </div>
+            <ModalFooter kind={talukModalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsTalukModalOpen(false)} inForm />
           </form>
         </div>
       </Modal>
@@ -1993,7 +2055,7 @@ export default function LocationSetup() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Building className="w-5 h-5" />
@@ -2086,23 +2148,23 @@ export default function LocationSetup() {
                   value={postalFormData.stateId}
                   onChange={(e) => {
                     const newStateId = toId(e.target.value);
-                    const newDists = districts.filter(
-                      (d) => d.stateId === newStateId && (postalModalMode === 'edit' || d.status === 'Active')
-                    );
-                    const firstD = newDists[0];
-                    const newTaluks = taluks.filter(
-                      (t) => t.districtId === firstD?.id && (postalModalMode === 'edit' || t.status === 'Active')
-                    );
-
-                    setPostalFormData({
-                      ...postalFormData,
+                    setPostalFormData(prev => ({
+                      ...prev,
                       stateId: newStateId,
-                      districtId: firstD ? firstD.id : '',
-                      talukId: newTaluks[0] ? newTaluks[0].id : ''
-                    });
+                      districtId: '',
+                      talukId: ''
+                    }));
+                    if (postalFormErrors.stateId) {
+                      setPostalFormErrors(prev => ({ ...prev, stateId: null }));
+                    }
                   }}
-                  className="w-full px-3 py-2 text-xs bg-white border border-[#E8DFD8] rounded-xl text-sm font-medium text-[#180200] focus:outline-none focus:border-[#510601] focus:ring-1 focus:ring-[#510601]"
+                  className={`w-full px-3 py-2 text-xs bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors ${
+                    postalFormErrors.stateId
+                      ? 'border-red-500 ring-1 ring-red-500/30 bg-red-50/20'
+                      : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
+                  }`}
                 >
+                  <option value="">-- Select State --</option>
                   {states
                     .filter((s) => postalModalMode === 'edit' || s.status === 'Active')
                     .map((s) => (
@@ -2111,6 +2173,12 @@ export default function LocationSetup() {
                       </option>
                     ))}
                 </select>
+                {postalFormErrors.stateId && (
+                  <p className="text-xs text-red-600 mt-1 font-medium flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    {postalFormErrors.stateId}
+                  </p>
+                )}
               </div>
 
               {/* 2. District (Dependent on State) */}
@@ -2122,20 +2190,17 @@ export default function LocationSetup() {
                   value={postalFormData.districtId}
                   onChange={(e) => {
                     const newDistId = toId(e.target.value);
-                    const newTaluks = taluks.filter(
-                      (t) => t.districtId === newDistId && (postalModalMode === 'edit' || t.status === 'Active')
-                    );
-
-                    setPostalFormData({
-                      ...postalFormData,
+                    setPostalFormData(prev => ({
+                      ...prev,
                       districtId: newDistId,
-                      talukId: newTaluks[0] ? newTaluks[0].id : ''
-                    });
+                      talukId: ''
+                    }));
                     if (postalFormErrors.districtId) {
-                      setPostalFormErrors({ ...postalFormErrors, districtId: null });
+                      setPostalFormErrors(prev => ({ ...prev, districtId: null }));
                     }
                   }}
-                  className={`w-full px-3 py-2 text-xs bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors ${
+                  disabled={!postalFormData.stateId}
+                  className={`w-full px-3 py-2 text-xs bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors disabled:bg-gray-100 disabled:cursor-not-allowed ${
                     postalFormErrors.districtId
                       ? 'border-red-500 ring-1 ring-red-500/30 bg-red-50/20'
                       : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
@@ -2144,7 +2209,7 @@ export default function LocationSetup() {
                   <option value="">-- Select District --</option>
                   {activeDistrictsForModal.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {d.name}
+                      {d.name || d.name_en} {d.status === 'Inactive' ? '(Inactive)' : ''}
                     </option>
                   ))}
                 </select>
@@ -2164,12 +2229,17 @@ export default function LocationSetup() {
                 <select
                   value={postalFormData.talukId}
                   onChange={(e) => {
-                    setPostalFormData({ ...postalFormData, talukId: toId(e.target.value) });
+                    const newTalukId = toId(e.target.value);
+                    setPostalFormData(prev => ({
+                      ...prev,
+                      talukId: newTalukId
+                    }));
                     if (postalFormErrors.talukId) {
-                      setPostalFormErrors({ ...postalFormErrors, talukId: null });
+                      setPostalFormErrors(prev => ({ ...prev, talukId: null }));
                     }
                   }}
-                  className={`w-full px-3 py-2 text-xs bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors ${
+                  disabled={!postalFormData.districtId}
+                  className={`w-full px-3 py-2 text-xs bg-white border rounded-xl text-sm font-medium text-[#180200] focus:outline-none transition-colors disabled:bg-gray-100 disabled:cursor-not-allowed ${
                     postalFormErrors.talukId
                       ? 'border-red-500 ring-1 ring-red-500/30 bg-red-50/20'
                       : 'border-[#E8DFD8] focus:border-[#510601] focus:ring-1 focus:ring-[#510601]'
@@ -2178,7 +2248,7 @@ export default function LocationSetup() {
                   <option value="">-- Select Taluk --</option>
                   {activeTaluksForModal.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.name}
+                      {t.name || t.name_en} {t.status === 'Inactive' ? '(Inactive)' : ''}
                     </option>
                   ))}
                 </select>
@@ -2203,21 +2273,7 @@ export default function LocationSetup() {
               </select>
             </div>
 
-            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setIsPostalModalOpen(false)}
-                className="py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="py-2.5 px-5 bg-[#510601] hover:bg-[#863221] text-white text-xs font-bold rounded-xl shadow-sm transition-colors cursor-pointer"
-              >
-                {postalModalMode === 'add' ? 'Add PIN Code' : 'Save Changes'}
-              </button>
-            </div>
+            <ModalFooter kind={postalModalMode === 'add' ? 'add' : 'edit'} onCancel={() => setIsPostalModalOpen(false)} inForm />
           </form>
         </div>
       </Modal>
@@ -2234,7 +2290,7 @@ export default function LocationSetup() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#E8DFD8] bg-[#FAF7F2]">
+          <div className="flex items-center justify-between px-6 h-14 shrink-0 border-b border-[#E8DFD8] bg-[#FAF7F2] rounded-t-2xl">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-[#510601]/10 text-[#510601]">
                 <Upload className="w-5 h-5" />
@@ -2243,9 +2299,6 @@ export default function LocationSetup() {
                 <h3 className="text-base font-bold text-[#180200]">
                   Bulk Import PIN Code Directory
                 </h3>
-                <p className="text-xs text-[#863221]">
-                  Import multiple postal code mappings using CSV or Excel spreadsheet format.
-                </p>
               </div>
             </div>
             <button
@@ -2335,7 +2388,7 @@ export default function LocationSetup() {
                           <th className="py-2.5 px-3">#</th>
                           <th className="py-2.5 px-3">PIN Code</th>
                           <th className="py-2.5 px-3">Post Office</th>
-                          <th className="py-2.5 px-3">Location Hierarchy</th>
+                          <th className="py-2.5 px-3">Belongs to</th>
                           <th className="py-2.5 px-3 text-right">Validation</th>
                         </tr>
                       </thead>
@@ -2372,156 +2425,17 @@ export default function LocationSetup() {
             )}
 
             {/* Modal Footer */}
-            <div className="flex items-center justify-between px-6 py-4 border-t border-[#E8DFD8] bg-[#FAF7F2] -mx-6 -mb-6 mt-6 rounded-b-2xl">
-              <p className="text-xs text-[#863221]">
-                Only valid rows without errors will be imported into the directory.
-              </p>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsImportModalOpen(false)}
-                  className="py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={(!importSummary || importSummary.valid === 0) || !hasPermission('masters.location.write')}
-                  title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                  onClick={handleCommitImport}
-                  className="py-2.5 px-5 bg-[#510601] hover:bg-[#863221] text-white text-xs font-bold rounded-xl shadow-sm disabled:opacity-40 transition-colors cursor-pointer"
-                >
-                  Import {importSummary?.valid || 0} Valid Records
-                </button>
-              </div>
-            </div>
+            <ModalFooter
+              kind="confirm"
+              submitLabel={`Import ${importSummary?.valid || 0} Records`}
+              onCancel={() => setIsImportModalOpen(false)}
+              onSubmit={handleCommitImport}
+              disabled={(!importSummary || importSummary.valid === 0) || !hasPermission('masters.location.write')}
+              title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
+              left={<span className="text-xs text-[#863221]">Only valid rows without errors will be imported.</span>}
+            />
           </div>
         </div>
-      </Modal>
-
-      {/* ==================================================== */}
-      {/* MODAL 5: STATUS TOGGLE CONFIRMATION                  */}
-      {/* ==================================================== */}
-      <Modal
-        isOpen={Boolean(statusDialog)}
-        onClose={() => setStatusDialog(null)}
-      >
-        {statusDialog && (
-          <div
-            className="bg-white rounded-2xl max-w-sm w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-3.5 ${
-                statusDialog.nextStatus === 'Inactive'
-                  ? 'bg-red-100 text-[#ED4636]'
-                  : 'bg-[#3D705C]/10 text-[#3D705C]'
-              }`}
-            >
-              {statusDialog.nextStatus === 'Inactive' ? (
-                <AlertTriangle className="w-7 h-7" />
-              ) : (
-                <CheckCircle2 className="w-7 h-7" />
-              )}
-            </div>
-
-            <h3 className="text-base font-bold text-[#180200]">
-              {statusDialog.nextStatus === 'Inactive' ? 'Deactivate' : 'Activate'}{' '}
-              {statusDialog.type === 'state'
-                ? 'State'
-                : statusDialog.type === 'district'
-                ? 'District'
-                : statusDialog.type === 'taluk'
-                ? 'Taluk'
-                : 'PIN Code'}?
-            </h3>
-            <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-              Are you sure you want to mark{' '}
-              <strong className="text-[#180200]">
-                {statusDialog.item.name || `${statusDialog.item.postalCode} (${statusDialog.item.area})`}
-              </strong>{' '}
-              as <span className="font-bold">{statusDialog.nextStatus}</span>?
-            </p>
-
-            <div className="mt-6 flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setStatusDialog(null)}
-                className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.location.write')}
-                title={!hasPermission('masters.location.write') ? 'Requires masters.location.write permission' : undefined}
-                onClick={handleConfirmStatusToggle}
-                className={`w-full py-2.5 px-4 text-white text-xs font-bold rounded-xl shadow-sm transition-colors cursor-pointer ${
-                  statusDialog.nextStatus === 'Inactive'
-                    ? 'bg-[#ED4636] hover:bg-[#C93324]'
-                    : 'bg-[#3D705C] hover:bg-[#2F5747]'
-                }`}
-              >
-                {statusDialog.nextStatus === 'Inactive' ? 'Deactivate' : 'Activate'}
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* ==================================================== */}
-      {/* MODAL 6: DELETE CONFIRMATION                         */}
-      {/* ==================================================== */}
-      <Modal
-        isOpen={Boolean(deleteDialog)}
-        onClose={() => setDeleteDialog(null)}
-      >
-        {deleteDialog && (
-          <div
-            className="bg-white rounded-2xl max-w-2xl w-full border border-[#E8DFD8] shadow-2xl p-6 text-center animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-14 h-14 rounded-full bg-red-100 text-[#ED4636] flex items-center justify-center mx-auto mb-3.5">
-              <Trash2 className="w-7 h-7" />
-            </div>
-
-            <h3 className="text-lg font-bold text-[#180200]">
-              Delete{' '}
-              {deleteDialog.type === 'district'
-                ? 'District'
-                : deleteDialog.type === 'taluk'
-                ? 'Taluk'
-                : 'PIN Code'}?
-            </h3>
-            <p className="text-xs text-[#863221] mt-1.5 leading-relaxed">
-              Are you sure you want to delete{' '}
-              <strong className="text-[#180200]">
-                {deleteDialog?.item?.name || `${deleteDialog?.item?.postalCode} (${deleteDialog?.item?.area})`}
-              </strong>
-              ? This action cannot be undone.
-            </p>
-
-            <div className="mt-6 flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setDeleteDialog(null)}
-                className="w-full py-2.5 px-4 border border-[#E8DFD8] text-[#863221] hover:text-[#180200] hover:bg-[#FAF7F2] text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!hasPermission('masters.location.delete')}
-                title={!hasPermission('masters.location.delete') ? 'Requires masters.location.delete permission' : undefined}
-                onClick={handleConfirmDelete}
-                className="w-full py-2.5 px-4 bg-[#ED4636] hover:bg-[#C93324] text-white text-xs font-bold rounded-xl shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Confirm Delete</span>
-              </button>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* ==================================================== */}
